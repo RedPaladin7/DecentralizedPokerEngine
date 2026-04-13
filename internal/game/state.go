@@ -79,7 +79,7 @@ type GameState struct {
 	Payouts map[string]int64
 }
 
-func NewGameSatte(tableID string, handNum int, players []*Player, dealerIdx int, sb, bb int64) *GameState {
+func NewGameState(tableID string, handNum int, players []*Player, dealerIdx int, sb, bb int64) *GameState {
 	gs := &GameState{
 		TableID: tableID,
 		HandNum: handNum,

@@ -78,7 +78,7 @@ func (m *Machine) ApplyAction (a Action) error {
 		if a.Amount < gs.MinRaise {
 			return fmt.Errorf("ApplyAction: raise of %d is below minimum %d", a.Amount, gs.MinRaise)
 		}
-		if totalNeeded > current.CurrentBet + current.CurrentBet {
+		if totalNeeded > current.Stack + current.CurrentBet {
 			return fmt.Errorf("ApplyAction: insufficient stack for raise")
 		}
 		gs.MinRaise = a.Amount

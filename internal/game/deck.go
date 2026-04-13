@@ -100,3 +100,7 @@ func (d *Deck) Deal() (Card, error) {
 	d.Cards = d.Cards[1:]
 	return c, nil
 }
+
+func (d *Deck) Remaining() int {
+	return len(d.Cards)
+}
