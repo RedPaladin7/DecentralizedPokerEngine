@@ -11,11 +11,11 @@ import (
 
 type Commitment struct {
 	Hash []byte 
-	Nonce []byte 
+	Nonce []byte
 }
 
 func NewCommitment(data []byte) (*Commitment, error) {
-	nonce := make([]byte, 20)
+	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -43,12 +43,12 @@ func (c *Commitment) HashHex() string {
 }
 
 func computeCommitmentHash(data, nonce []byte) []byte {
-	h := sha256.New()
+	h := sha256.New() 
 
 	lenData := make([]byte, 4)
-	lenData[0] = byte(len(data)>>24)
-	lenData[1] = byte(len(data)>>16)
-	lenData[2] = byte(len(data)>>8)
+	lenData[0] = byte(len(data) >> 24)
+	lenData[1] = byte(len(data) >> 16)
+	lenData[2] = byte(len(data) >> 8)
 	lenData[3] = byte(len(data))
 	h.Write(lenData)
 	h.Write(data)
@@ -82,10 +82,10 @@ type ShamirShare struct {
 
 func SplitSecret(secret *big.Int, t, n int, p *big.Int) ([]ShamirShare, error) {
 	if t < 2 {
-		return nil, errors.New("")
+		return nil, errors.New("SplitSecret: threshold must be >= 2")
 	}
 	if n < t {
-		return nil, fmt.Errorf("")
+		return nil, fmt.Errorf("SplitSecret: n=%d must be >= t=%d", n, t)
 	}
 
 	coeffs := make([]*big.Int, t)
@@ -118,8 +118,9 @@ func SplitSecret(secret *big.Int, t, n int, p *big.Int) ([]ShamirShare, error) {
 
 func ReconstructSecret(shares []ShamirShare, p *big.Int) (*big.Int, error) {
 	if len(shares) == 0 {
-		return nil, errors.New("")
+		return nil, errors.New("ReconstructSecret: no shares provided")
 	}
+
 	secret := big.NewInt(0)
 	for i, si := range shares {
 		xi := big.NewInt(int64(si.Index))
@@ -127,7 +128,7 @@ func ReconstructSecret(shares []ShamirShare, p *big.Int) (*big.Int, error) {
 		den := big.NewInt(1)
 		for j, sj := range shares {
 			if i == j {
-				continue 
+				continue
 			}
 			xj := big.NewInt(int64(sj.Index))
 			negXj := new(big.Int).Sub(p, xj)
@@ -139,17 +140,15 @@ func ReconstructSecret(shares []ShamirShare, p *big.Int) (*big.Int, error) {
 			den.Mul(den, diff)
 			den.Mod(den, p)
 		}
-
 		denInv := new(big.Int).ModInverse(den, p)
 		if denInv == nil {
 			return nil, fmt.Errorf("")
 		}
-		lagrange := new(big.Int).Mul(si.Value, num)
-		lagrange.Mod(lagrange, p)
-		lagrange.Mul(lagrange, denInv)
-		lagrange.Mod(lagrange, p)
-
-		secret.Add(secret, lagrange)
+		legrange := new(big.Int).Mul(si.Value, num)
+		legrange.Mod(legrange, p)
+		legrange.Mul(legrange, denInv)
+		legrange.Mod(legrange, p)
+		secret.Add(secret, legrange)
 		secret.Mod(secret, p)
 	}
 	return secret, nil

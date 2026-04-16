@@ -46,7 +46,7 @@ func FieldToCard(val *big.Int, p *big.Int) int {
 	return -1
 }
 
-func BuildPlainTextDeck(p *big.Int) []*big.Int {
+func BuildPlaintextDeck(p *big.Int) []*big.Int {
 	deck := make([]*big.Int, 52)
 	for i := range deck {
 		deck[i] = CardToField(i, p)
