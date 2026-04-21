@@ -1,0 +1,109 @@
+syntax = "proto3";
+package network ;
+option go_package = "github.com/RedPaladin7/DecentralizedPokerEngine/internal/network";
+
+enum MsgType {
+    UNKNOWN = 0;
+    JOIN_TABLE = 1;
+    PLAYER_READY = 2;
+    SHUFFLE_STEP = 3;
+    SHUFFLE_COMMIT = 4;
+    PARTIAL_DECRYPT = 5;
+    PLAYER_ACTION = 6;
+    GAME_STATE_SYNC = 7;
+    HEARTBEAT = 8;
+    TIMEOUT_VOTE = 9;
+    HAND_RESULT = 10;
+    LEAVE_TABLE = 11;
+}
+
+message Envelope {
+    MsgType type = 1;
+    string sender_id = 2;
+    int64 seq = 3;
+    int64 timestamp = 4;
+    bytes payload = 5;
+    bytes signature = 6;
+}
+
+message JoinTable {
+    string table_id = 1;
+    string player_name = 2;
+    int64 buy_in = 3;
+    bytes sra_pub_key_e = 4;
+    bytes session_nonce = 5;
+}
+
+message PlayerReady {
+    string table_id = 1;
+    string hand_num = 2;
+}
+
+message ShuffleStep {
+    string table_id = 1;
+    int64 hand_num = 2;
+    string player_id = 3;
+    repeated bytes deck = 4;
+    bytes commitment_hash = 5;
+    bytes commitment_nonce = 6;
+}
+
+message ShuffleCommit {
+    string table_id = 1;
+    int64 hand_num = 2;
+    string player_id = 3;
+    bytes commitment_hash = 4;
+}
+
+message ZKProofWire {
+    bytes a = 1;
+    bytes b = 2;
+    bytes s = 3;
+    bytes h = 4;
+}
+
+message PartialDecrypt {
+    string table_id = 1;
+    int64 hand_num = 2;
+    string player_id = 3;
+    int32 card_index = 4;
+    bytes ciphertext = 5;
+    bytes result = 6;
+    ZKProofWire proof = 7;
+}
+
+message PlayerAction {
+    string table_id = 1;
+    int64 hand_num = 2;
+    int32 pgase = 3;
+    int64 pot = 4;
+    int64 current_bet = 5;
+    string action_player = 6;
+    bytes state_root = 7;
+    repeated bytes action_log = 8;
+}
+
+message Heartbeat {
+    string table_id = 1;
+    int64 hand_num = 2;
+    int64 seq = 3;
+}
+
+message TimeoutVote {
+    string table_id = 1;
+    int64 hand_num = 2;
+    string voting_player_id = 3;
+    string timeout_player_id = 4;
+}
+
+message HandResult {
+    string table_id = 1;
+    int64 hand_num = 2;
+    repeated PotResult pots = 3;
+    bytes state_root = 4;
+}
+
+message PotResult {
+    int64 amount = 1;
+    repeated string winner_ids = 2;
+}
