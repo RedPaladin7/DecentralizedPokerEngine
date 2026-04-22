@@ -36,7 +36,7 @@ message JoinTable {
 
 message PlayerReady {
     string table_id = 1;
-    string hand_num = 2;
+    int64 hand_num = 2;
 }
 
 message ShuffleStep {
@@ -75,7 +75,16 @@ message PartialDecrypt {
 message PlayerAction {
     string table_id = 1;
     int64 hand_num = 2;
-    int32 pgase = 3;
+    string player_id = 3;
+    int32 action = 4;
+    int64 amount = 5;
+    int64 seq = 6;
+}
+
+message GameStateSync {
+    string table_id = 1;
+    int64 hand_num = 2;
+    int32 phase = 3;
     int64 pot = 4;
     int64 current_bet = 5;
     string action_player = 6;

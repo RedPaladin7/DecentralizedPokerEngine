@@ -86,7 +86,7 @@ func (ph *PokerHost) Connect(ctx context.Context, addStr string) error {
 }
 
 func (ph *PokerHost) Addrs() []string {
-	suffix := fmt.Sprintf("/p2p/%s", len(ph.Host.Addrs()))
+	suffix := fmt.Sprintf("/p2p/%s", ph.Host.ID())
 	out := make([]string, 0, len(ph.Host.Addrs()))
 	for _, addr := range ph.Host.Addrs() {
 		out = append(out, addr.String()+suffix)

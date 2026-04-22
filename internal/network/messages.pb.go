@@ -260,7 +260,7 @@ func (x *JoinTable) GetSessionNonce() []byte {
 type PlayerReady struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TableId       string                 `protobuf:"bytes,1,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
-	HandNum       string                 `protobuf:"bytes,2,opt,name=hand_num,json=handNum,proto3" json:"hand_num,omitempty"`
+	HandNum       int64                  `protobuf:"varint,2,opt,name=hand_num,json=handNum,proto3" json:"hand_num,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -302,11 +302,11 @@ func (x *PlayerReady) GetTableId() string {
 	return ""
 }
 
-func (x *PlayerReady) GetHandNum() string {
+func (x *PlayerReady) GetHandNum() int64 {
 	if x != nil {
 		return x.HandNum
 	}
-	return ""
+	return 0
 }
 
 type ShuffleStep struct {
@@ -625,12 +625,10 @@ type PlayerAction struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TableId       string                 `protobuf:"bytes,1,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
 	HandNum       int64                  `protobuf:"varint,2,opt,name=hand_num,json=handNum,proto3" json:"hand_num,omitempty"`
-	Pgase         int32                  `protobuf:"varint,3,opt,name=pgase,proto3" json:"pgase,omitempty"`
-	Pot           int64                  `protobuf:"varint,4,opt,name=pot,proto3" json:"pot,omitempty"`
-	CurrentBet    int64                  `protobuf:"varint,5,opt,name=current_bet,json=currentBet,proto3" json:"current_bet,omitempty"`
-	ActionPlayer  string                 `protobuf:"bytes,6,opt,name=action_player,json=actionPlayer,proto3" json:"action_player,omitempty"`
-	StateRoot     []byte                 `protobuf:"bytes,7,opt,name=state_root,json=stateRoot,proto3" json:"state_root,omitempty"`
-	ActionLog     [][]byte               `protobuf:"bytes,8,rep,name=action_log,json=actionLog,proto3" json:"action_log,omitempty"`
+	PlayerId      string                 `protobuf:"bytes,3,opt,name=player_id,json=playerId,proto3" json:"player_id,omitempty"`
+	Action        int32                  `protobuf:"varint,4,opt,name=action,proto3" json:"action,omitempty"`
+	Amount        int64                  `protobuf:"varint,5,opt,name=amount,proto3" json:"amount,omitempty"`
+	Seq           int64                  `protobuf:"varint,6,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -679,42 +677,128 @@ func (x *PlayerAction) GetHandNum() int64 {
 	return 0
 }
 
-func (x *PlayerAction) GetPgase() int32 {
+func (x *PlayerAction) GetPlayerId() string {
 	if x != nil {
-		return x.Pgase
+		return x.PlayerId
+	}
+	return ""
+}
+
+func (x *PlayerAction) GetAction() int32 {
+	if x != nil {
+		return x.Action
 	}
 	return 0
 }
 
-func (x *PlayerAction) GetPot() int64 {
+func (x *PlayerAction) GetAmount() int64 {
+	if x != nil {
+		return x.Amount
+	}
+	return 0
+}
+
+func (x *PlayerAction) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+type GameStateSync struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TableId       string                 `protobuf:"bytes,1,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
+	HandNum       int64                  `protobuf:"varint,2,opt,name=hand_num,json=handNum,proto3" json:"hand_num,omitempty"`
+	Phase         int32                  `protobuf:"varint,3,opt,name=phase,proto3" json:"phase,omitempty"`
+	Pot           int64                  `protobuf:"varint,4,opt,name=pot,proto3" json:"pot,omitempty"`
+	CurrentBet    int64                  `protobuf:"varint,5,opt,name=current_bet,json=currentBet,proto3" json:"current_bet,omitempty"`
+	ActionPlayer  string                 `protobuf:"bytes,6,opt,name=action_player,json=actionPlayer,proto3" json:"action_player,omitempty"`
+	StateRoot     []byte                 `protobuf:"bytes,7,opt,name=state_root,json=stateRoot,proto3" json:"state_root,omitempty"`
+	ActionLog     [][]byte               `protobuf:"bytes,8,rep,name=action_log,json=actionLog,proto3" json:"action_log,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GameStateSync) Reset() {
+	*x = GameStateSync{}
+	mi := &file_internal_network_messages_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GameStateSync) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GameStateSync) ProtoMessage() {}
+
+func (x *GameStateSync) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_network_messages_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GameStateSync.ProtoReflect.Descriptor instead.
+func (*GameStateSync) Descriptor() ([]byte, []int) {
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *GameStateSync) GetTableId() string {
+	if x != nil {
+		return x.TableId
+	}
+	return ""
+}
+
+func (x *GameStateSync) GetHandNum() int64 {
+	if x != nil {
+		return x.HandNum
+	}
+	return 0
+}
+
+func (x *GameStateSync) GetPhase() int32 {
+	if x != nil {
+		return x.Phase
+	}
+	return 0
+}
+
+func (x *GameStateSync) GetPot() int64 {
 	if x != nil {
 		return x.Pot
 	}
 	return 0
 }
 
-func (x *PlayerAction) GetCurrentBet() int64 {
+func (x *GameStateSync) GetCurrentBet() int64 {
 	if x != nil {
 		return x.CurrentBet
 	}
 	return 0
 }
 
-func (x *PlayerAction) GetActionPlayer() string {
+func (x *GameStateSync) GetActionPlayer() string {
 	if x != nil {
 		return x.ActionPlayer
 	}
 	return ""
 }
 
-func (x *PlayerAction) GetStateRoot() []byte {
+func (x *GameStateSync) GetStateRoot() []byte {
 	if x != nil {
 		return x.StateRoot
 	}
 	return nil
 }
 
-func (x *PlayerAction) GetActionLog() [][]byte {
+func (x *GameStateSync) GetActionLog() [][]byte {
 	if x != nil {
 		return x.ActionLog
 	}
@@ -732,7 +816,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_internal_network_messages_proto_msgTypes[8]
+	mi := &file_internal_network_messages_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -744,7 +828,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_network_messages_proto_msgTypes[8]
+	mi := &file_internal_network_messages_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -757,7 +841,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_internal_network_messages_proto_rawDescGZIP(), []int{8}
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Heartbeat) GetTableId() string {
@@ -793,7 +877,7 @@ type TimeoutVote struct {
 
 func (x *TimeoutVote) Reset() {
 	*x = TimeoutVote{}
-	mi := &file_internal_network_messages_proto_msgTypes[9]
+	mi := &file_internal_network_messages_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -805,7 +889,7 @@ func (x *TimeoutVote) String() string {
 func (*TimeoutVote) ProtoMessage() {}
 
 func (x *TimeoutVote) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_network_messages_proto_msgTypes[9]
+	mi := &file_internal_network_messages_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -818,7 +902,7 @@ func (x *TimeoutVote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TimeoutVote.ProtoReflect.Descriptor instead.
 func (*TimeoutVote) Descriptor() ([]byte, []int) {
-	return file_internal_network_messages_proto_rawDescGZIP(), []int{9}
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TimeoutVote) GetTableId() string {
@@ -861,7 +945,7 @@ type HandResult struct {
 
 func (x *HandResult) Reset() {
 	*x = HandResult{}
-	mi := &file_internal_network_messages_proto_msgTypes[10]
+	mi := &file_internal_network_messages_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -873,7 +957,7 @@ func (x *HandResult) String() string {
 func (*HandResult) ProtoMessage() {}
 
 func (x *HandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_network_messages_proto_msgTypes[10]
+	mi := &file_internal_network_messages_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -886,7 +970,7 @@ func (x *HandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandResult.ProtoReflect.Descriptor instead.
 func (*HandResult) Descriptor() ([]byte, []int) {
-	return file_internal_network_messages_proto_rawDescGZIP(), []int{10}
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *HandResult) GetTableId() string {
@@ -927,7 +1011,7 @@ type PotResult struct {
 
 func (x *PotResult) Reset() {
 	*x = PotResult{}
-	mi := &file_internal_network_messages_proto_msgTypes[11]
+	mi := &file_internal_network_messages_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -939,7 +1023,7 @@ func (x *PotResult) String() string {
 func (*PotResult) ProtoMessage() {}
 
 func (x *PotResult) ProtoReflect() protoreflect.Message {
-	mi := &file_internal_network_messages_proto_msgTypes[11]
+	mi := &file_internal_network_messages_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -952,7 +1036,7 @@ func (x *PotResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PotResult.ProtoReflect.Descriptor instead.
 func (*PotResult) Descriptor() ([]byte, []int) {
-	return file_internal_network_messages_proto_rawDescGZIP(), []int{11}
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PotResult) GetAmount() int64 {
@@ -991,7 +1075,7 @@ const file_internal_network_messages_proto_rawDesc = "" +
 	"\rsession_nonce\x18\x05 \x01(\fR\fsessionNonce\"C\n" +
 	"\vPlayerReady\x12\x19\n" +
 	"\btable_id\x18\x01 \x01(\tR\atableId\x12\x19\n" +
-	"\bhand_num\x18\x02 \x01(\tR\ahandNum\"\xc8\x01\n" +
+	"\bhand_num\x18\x02 \x01(\x03R\ahandNum\"\xc8\x01\n" +
 	"\vShuffleStep\x12\x19\n" +
 	"\btable_id\x18\x01 \x01(\tR\atableId\x12\x19\n" +
 	"\bhand_num\x18\x02 \x01(\x03R\ahandNum\x12\x1b\n" +
@@ -1019,11 +1103,18 @@ const file_internal_network_messages_proto_rawDesc = "" +
 	"ciphertext\x18\x05 \x01(\fR\n" +
 	"ciphertext\x12\x16\n" +
 	"\x06result\x18\x06 \x01(\fR\x06result\x12*\n" +
-	"\x05proof\x18\a \x01(\v2\x14.network.ZKProofWireR\x05proof\"\xf0\x01\n" +
+	"\x05proof\x18\a \x01(\v2\x14.network.ZKProofWireR\x05proof\"\xa3\x01\n" +
 	"\fPlayerAction\x12\x19\n" +
 	"\btable_id\x18\x01 \x01(\tR\atableId\x12\x19\n" +
+	"\bhand_num\x18\x02 \x01(\x03R\ahandNum\x12\x1b\n" +
+	"\tplayer_id\x18\x03 \x01(\tR\bplayerId\x12\x16\n" +
+	"\x06action\x18\x04 \x01(\x05R\x06action\x12\x16\n" +
+	"\x06amount\x18\x05 \x01(\x03R\x06amount\x12\x10\n" +
+	"\x03seq\x18\x06 \x01(\x03R\x03seq\"\xf1\x01\n" +
+	"\rGameStateSync\x12\x19\n" +
+	"\btable_id\x18\x01 \x01(\tR\atableId\x12\x19\n" +
 	"\bhand_num\x18\x02 \x01(\x03R\ahandNum\x12\x14\n" +
-	"\x05pgase\x18\x03 \x01(\x05R\x05pgase\x12\x10\n" +
+	"\x05phase\x18\x03 \x01(\x05R\x05phase\x12\x10\n" +
 	"\x03pot\x18\x04 \x01(\x03R\x03pot\x12\x1f\n" +
 	"\vcurrent_bet\x18\x05 \x01(\x03R\n" +
 	"currentBet\x12#\n" +
@@ -1081,7 +1172,7 @@ func file_internal_network_messages_proto_rawDescGZIP() []byte {
 }
 
 var file_internal_network_messages_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_internal_network_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_internal_network_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_internal_network_messages_proto_goTypes = []any{
 	(MsgType)(0),           // 0: network.MsgType
 	(*Envelope)(nil),       // 1: network.Envelope
@@ -1092,15 +1183,16 @@ var file_internal_network_messages_proto_goTypes = []any{
 	(*ZKProofWire)(nil),    // 6: network.ZKProofWire
 	(*PartialDecrypt)(nil), // 7: network.PartialDecrypt
 	(*PlayerAction)(nil),   // 8: network.PlayerAction
-	(*Heartbeat)(nil),      // 9: network.Heartbeat
-	(*TimeoutVote)(nil),    // 10: network.TimeoutVote
-	(*HandResult)(nil),     // 11: network.HandResult
-	(*PotResult)(nil),      // 12: network.PotResult
+	(*GameStateSync)(nil),  // 9: network.GameStateSync
+	(*Heartbeat)(nil),      // 10: network.Heartbeat
+	(*TimeoutVote)(nil),    // 11: network.TimeoutVote
+	(*HandResult)(nil),     // 12: network.HandResult
+	(*PotResult)(nil),      // 13: network.PotResult
 }
 var file_internal_network_messages_proto_depIdxs = []int32{
 	0,  // 0: network.Envelope.type:type_name -> network.MsgType
 	6,  // 1: network.PartialDecrypt.proof:type_name -> network.ZKProofWire
-	12, // 2: network.HandResult.pots:type_name -> network.PotResult
+	13, // 2: network.HandResult.pots:type_name -> network.PotResult
 	3,  // [3:3] is the sub-list for method output_type
 	3,  // [3:3] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
@@ -1119,7 +1211,7 @@ func file_internal_network_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_network_messages_proto_rawDesc), len(file_internal_network_messages_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
