@@ -14,21 +14,23 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Every player is both client and server simultaneously
+// Represents a complete player in the game
 type Node struct {
-	Host *PokerHost
-	Gossip *GossipManager
-	Lobby *Lobby
-	Log *Gamelog
-	Discovery *MDNSDiscovery
+	Host *PokerHost // host responsible for connections
+	Gossip *GossipManager // gossip protocol for sending and receiving messages
+	Lobby *Lobby // keeping track of the current game state 
+	Log *Gamelog // log of the actions taken place till now 
+	Discovery *MDNSDiscovery // discovering new peers with the same tag
 
 	tableID string 
 	playerName string 
 	buyIn int64 
-	sraKey *pokercrypto.SRAKey
+	sraKey *pokercrypto.SRAKey // complete key pair for the player 
 
 	seq int64 
 	mu sync.RWMutex
-	peers map[string]ed25519.PublicKey
+	peers map[string]ed25519.PublicKey // public key of all the other players
 	started bool 
 
 	OnJoinTable func(*JoinTable, string)

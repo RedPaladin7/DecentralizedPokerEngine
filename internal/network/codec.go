@@ -1,4 +1,6 @@
 package network
+// "/internal/network/codec.go"
+// Translator layer between go data structures and raw bytes over network
 
 import (
 	"crypto/ed25519"
@@ -12,13 +14,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const MaxMessageSize = 4 * 1024 * 1024
+const MaxMessageSize = 4 * 1024 * 1024 // prevent memory exhaustion attack
+// framing scheme => first 4 bytes tell the length of the message (bigEndian)
 
 func EncodeEnvelope(env *Envelope, privKey ed25519.PrivateKey) ([]byte, error) {
 	sigData := envelopeSignBytes(env)
-	env.Signature = ed25519.Sign(privKey, sigData)
+	env.Signature = ed25519.Sign(privKey, sigData) // signing contents of data with private key
 
-	b, err := proto.Marshal(env)
+	b, err := proto.Marshal(env) // struct to bytes 
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -26,8 +29,8 @@ func EncodeEnvelope(env *Envelope, privKey ed25519.PrivateKey) ([]byte, error) {
 		return nil, fmt.Errorf("")
 	}
 
-	frame := make([]byte, 4+len(b))
-	binary.BigEndian.PutUint32(frame[:4], uint32(len(b)))
+	frame := make([]byte, 4+len(b)) // adding length of message as prefix
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(b))) 
 	copy(frame[4:], b)
 	return frame,  nil
 }
@@ -44,6 +47,7 @@ func DecodeEnvelope(frame []byte, pubKeyFn func(peerID string) (ed25519.PublicKe
 		return nil, fmt.Errorf("")
 	}
 	env := &Envelope{}
+	// reading uptill message length
 	if err := proto.Unmarshal(frame[4:4+msgLen], env); err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -64,6 +68,7 @@ func DecodeEnvelope(frame []byte, pubKeyFn func(peerID string) (ed25519.PublicKe
 }
 
 func envelopeSignBytes(env *Envelope) []byte {
+	// signature type => type + sender + 0x00 + seq + timestamp + payload
 	buf := make([]byte, 0, 1+len(env.SenderId)+1+8+8+len(env.Payload))
 	buf = append(buf, byte(env.Type)) 
 	buf = append(buf, []byte(env.SenderId)...)
