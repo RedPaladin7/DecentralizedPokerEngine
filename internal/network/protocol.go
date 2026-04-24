@@ -1,4 +1,6 @@
 package network
+// "internal/network/protocol.go"
+// sending direct messages
 
 import (
 	"bufio"
@@ -13,18 +15,24 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
+// id so the receiver knows which handler to dispatch to
 const PokerProtocolID = protocol.ID("/poker/1.0.0")
 
 type StreamHandler func(env *Envelope, from peer.ID)
 
+// receiving direct messages
+// whenever a peer opens a /poker/1.0.0 stream to me, spawn a new go routine per incoming stream
+// generic receiver, what do with the msg depends on the type and thus the handler will differ
 func RegisterProtocolHandler(h host.Host, handler StreamHandler) {
 	h.SetStreamHandler(PokerProtocolID, func(s network.Stream){
 		defer s.Close()
 		remotePeer := s.Conn().RemotePeer()
+		// reading a batch of bytes at once
 		reader := bufio.NewReaderSize(s, 4096)
 
 		for {
-			lenBuf := make([]byte, 4)
+			// tcp ensures bytes arrive in order, dropped ones are retransmitted
+			lenBuf := make([]byte, 4) // first four bytes for the length
 			if _, err := io.ReadFull(reader, lenBuf); err != nil {
 				return 
 			}
@@ -32,24 +40,29 @@ func RegisterProtocolHandler(h host.Host, handler StreamHandler) {
 			if msgLen == 0 || int(msgLen) > MaxMessageSize {
 				return 
 			}
-			msgBuf := make([]byte, msgLen)
+			msgBuf := make([]byte, msgLen) // actual message
 			if _, err := io.ReadFull(reader, msgBuf); err != nil {
 				return 
 			}
 
+			// assembling the final frame
 			frame := make([]byte, 4+msgLen)
 			copy(frame[:4], lenBuf)
 			copy(frame[4:], msgBuf)
 
+			// decoding the envelope
 			env, err := DecodeEnvelope(frame, nil)
 			if err != nil {
 				continue 
 			}
+			// handler function: what to actually do with the received message
 			handler(env, remotePeer)
 		}
 	})
 }
 
+// new stream opened and closed for every message
+// but streams are multiplexed over one tcp connection so no new tcp handshake happens
 func SendDirect(ctx context.Context, h host.Host, peerID peer.ID, frame []byte) error {
 	s, err := h.NewStream(ctx, peerID, PokerProtocolID)
 	if err != nil {

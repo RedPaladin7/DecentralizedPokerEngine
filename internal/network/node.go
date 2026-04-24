@@ -1,4 +1,6 @@
 package network
+// "/internal/network/node.go"
+// representation of complete player
 
 import (
 	"context"
@@ -17,10 +19,10 @@ import (
 // Every player is both client and server simultaneously
 // Represents a complete player in the game
 type Node struct {
-	Host *PokerHost // host responsible for connections
-	Gossip *GossipManager // gossip protocol for sending and receiving messages
-	Lobby *Lobby // keeping track of the current game state 
-	Log *Gamelog // log of the actions taken place till now 
+	Host *PokerHost // host responsible for connections, holds private key for signing outgoing messages
+	Gossip *GossipManager // subscribes to table and game topics, and publishes to them
+	Lobby *Lobby // track of who has joined and who is ready
+	Log *Gamelog // append only per hand evidence log
 	Discovery *MDNSDiscovery // discovering new peers with the same tag
 
 	tableID string 
@@ -28,7 +30,7 @@ type Node struct {
 	buyIn int64 
 	sraKey *pokercrypto.SRAKey // complete key pair for the player 
 
-	seq int64 
+	seq int64 // monotonic outbound counter, atomic
 	mu sync.RWMutex
 	peers map[string]ed25519.PublicKey // public key of all the other players
 	started bool 
@@ -62,10 +64,11 @@ func NewNode(
 		return nil, fmt.Errorf("")
 	}
 
+	// note we don't start the mdns service yet
 	return &Node{
 		Host: ph,
 		Gossip: gm,
-		Lobby: NewLobby(tableID, 2),
+		Lobby: NewLobby(tableID, 9),
 		Log: NewGameLog(tableID, 0),
 		tableID: tableID,
 		playerName: playerName,
@@ -84,9 +87,12 @@ func (n *Node) Start(ctx context.Context) error {
 	n.started = true
 	n.mu.Unlock()
 
+	// setting up direct comm, takes hanlder func => what to do with direct message
+	// direct comm only ever used for partial decrypts
 	RegisterProtocolHandler(n.Host.Host, func(env *Envelope, from peer.ID){
 		_ = n.Log.Append(env)
 		if env.Type == MsgType_PARTIAL_DECRYPT && n.OnPartialDecrypt != nil {
+			// calling partial decrypt callback 
 			msg := &PartialDecrypt{}
 			if proto.Unmarshal(env.Payload, msg) == nil {
 				n.OnPartialDecrypt(msg)
@@ -94,8 +100,11 @@ func (n *Node) Start(ctx context.Context) error {
 		}
 	})
 
+	// starting the mdns service
 	disc, err := NewMDNSDiscovery(n.Host.Host, func(pi peer.AddrInfo) {
 		n.Host.Host.Peerstore().AddAddrs(pi.ID, pi.Addrs, 10*time.Minute) 
+		// establishing underlying tcp connection with all peers in the peerstore
+		// all other connections are multiplexed over this
 		_ = n.Host.Host.Connect(ctx, pi)
 	})
 	if err != nil {
@@ -103,6 +112,7 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	n.Discovery = disc 
 
+	// starting the receivers loop
 	go n.receiveLoop(ctx)
 	return nil
 }

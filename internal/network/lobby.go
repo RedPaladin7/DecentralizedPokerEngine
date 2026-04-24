@@ -1,4 +1,6 @@
 package network
+// "/internal/network/lobby.go"
+// manages everything that happens before a hand starts
 
 import (
 	"context"
@@ -18,6 +20,7 @@ const (
 	LobbyPlaying
 )
 
+// info that we have on each player in lobby
 type SeatInfo struct {
 	PlayerID string 
 	PlayerName string 
@@ -28,6 +31,7 @@ type SeatInfo struct {
 	JoinedAt time.Time
 }
 
+// game lobby repr
 type Lobby struct {
 	mu sync.RWMutex
 	tableID string 
@@ -47,6 +51,8 @@ func NewLobby(tableID string, maxSeats int) *Lobby {
 	}
 }
 
+// new player joining lobby
+// can be used as handler func like described in protocol.go file
 func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -83,7 +89,8 @@ func (l *Lobby) HandleReady(msg *PlayerReady, fromPeerID string) error {
 		return fmt.Errorf("")
 	}
 	seat.IsReady = true 
-	l.checkAllReady()
+	// if all seats are full, close the readyCh
+	l.checkAllReady() // check at every new join
 	return nil
 }
 
@@ -103,10 +110,11 @@ func (l *Lobby) checkAllReady() {
 }
 
 func (l *Lobby) WaitReady(ctx context.Context) error {
+	// event driven, no cpu usage while waiting
 	select {
-	case <-l.readyCh:
+	case <-l.readyCh: // fired when channel closed
 		return nil
-	case <-ctx.Done():
+	case <-ctx.Done(): // fired on time out
 		return fmt.Errorf("")
 	}
 }
@@ -115,6 +123,7 @@ func (l *Lobby) Seats() []*SeatInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	// return copy of all seats in order of join time
 	out := make([]*SeatInfo, 0, len(l.seats))
 	for _, s := range l.seats {
 		cp := *s 

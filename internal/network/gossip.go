@@ -1,4 +1,6 @@
 package network
+// "/internal/network/discovery.go"
+// sending messages to all peers simultaneously
 
 import (
 	"context"
@@ -10,6 +12,10 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+// important distinction for signature: 
+// for direct messages signature verification is not requried, noise already ensures the stream is coming from the correct person
+// for gossip, signature verification is required because the message can be delivered through an intermediate peer in mesh
+// we must ensure that the original sender sent it
 func topicName(tableID string) string {
 	return "poker/table/" + tableID
 }
@@ -18,15 +24,18 @@ func heartbeatTopicName(tableID string) string {
 	return "poker/heartbeat/" + tableID
 }
 
+// pub sub architecture
+// messages broadcasted to topic, listeners can subscribe to it
+// mesh -> not every peer is connected to everyone else
 type GossipManager struct {
-	ps *pubsub.PubSub
+	ps *pubsub.PubSub // Gossip sub engine
 	tableID string 
 	tableTopic *pubsub.Topic
 	heartbeatTopic *pubsub.Topic
 	tableSub *pubsub.Subscription
 	heartbeatSub *pubsub.Subscription
 	mu sync.Mutex
-	seqNums map[string]int64
+	seqNums map[string]int64 // last accepted seq per sender, solely for replay protection
 }
 
 func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*GossipManager, error) {
@@ -34,6 +43,7 @@ func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*Gossip
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
+	// joining topics so we can publish to them
 	tt, err := ps.Join(topicName(tableID))
 	if err != nil {
 		return nil, fmt.Errorf("")
@@ -42,6 +52,7 @@ func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*Gossip
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}	
+	// subscribing to topics to get messages from them
 	ts, err := tt.Subscribe()
 	if err != nil {
 		return nil, fmt.Errorf("")
@@ -61,6 +72,7 @@ func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*Gossip
 	}, nil
 }
 
+// publishing messages
 func (gm *GossipManager) Publish(ctx context.Context, frame []byte) error {
 	if err := gm.tableTopic.Publish(ctx, frame); err != nil {
 		return fmt.Errorf("")
@@ -75,20 +87,22 @@ func (gm *GossipManager) PublishHeartbeat(ctx context.Context, frame []byte) err
 	return nil
 }
 
+// receiving messages
 func (gm *GossipManager) NewTableMessage(ctx context.Context) ([]byte, peer.ID, error)  {
-	mgs, err := gm.tableSub.Next(ctx)
+	msg, err := gm.tableSub.Next(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("")
 	}
-	return mgs.Data, mgs.ReceivedFrom, nil
+	// received from is not original sender, it is direct neighbor who you get the message from in the mesh
+	return msg.Data, msg.ReceivedFrom, nil
 }
 
 func (gm *GossipManager) NewHeartbeatMessage(ctx context.Context) ([]byte, peer.ID, error) {
-	mgs, err := gm.heartbeatSub.Next(ctx)
+	msg, err := gm.heartbeatSub.Next(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("")
 	}
-	return mgs.Data, mgs.ReceivedFrom, nil
+	return msg.Data, msg.ReceivedFrom, nil
 }
 
 func (gm *GossipManager) CheckAndUpdateSeq(senderID string, seq int64) error {
@@ -98,6 +112,7 @@ func (gm *GossipManager) CheckAndUpdateSeq(senderID string, seq int64) error {
 	if exists && seq <= last {
 		return fmt.Errorf("")
 	}
+	// new message must have greater seq num than the last received
 	gm.seqNums[senderID] = seq
 	return nil
 }
