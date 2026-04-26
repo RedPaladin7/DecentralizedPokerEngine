@@ -15,7 +15,7 @@ type KeyShareStore struct {
 	prime *big.Int
 }
 
-func NewKeyShareSTore(prime *big.Int) *KeyShareStore {
+func NewKeyShareStore(prime *big.Int) *KeyShareStore {
 	return &KeyShareStore{
 		prime: prime,
 		sharesReceived: make(map[string]pokercrypto.ShamirShare),
@@ -36,7 +36,7 @@ func (ks *KeyShareStore) ContributeShare(ownerID string) (pokercrypto.ShamirShar
 	return share, ok
 }
 
-func (ks *KeyShareStore) AddReconstructShare(ownerID string, share pokercrypto.ShamirShare) {
+func (ks *KeyShareStore) AddReconstructionShare(ownerID string, share pokercrypto.ShamirShare) {
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	for _, existing := range ks.sharesHeld[ownerID] {
@@ -70,7 +70,7 @@ func (ks *KeyShareStore) Reconstruct(ownerID string, threshold int) (*big.Int, e
 	return key, nil
 }
 
-func (ks *KeyShareStore) ReconstrusctSRAKey(ownerID string, threshold int) (*pokercrypto.SRAKey, error) {
+func (ks *KeyShareStore) ReconstructSRAKey(ownerID string, threshold int) (*pokercrypto.SRAKey, error) {
 	d, err := ks.Reconstruct(ownerID, threshold)
 	if err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func (ks *KeyShareStore) ReconstrusctSRAKey(ownerID string, threshold int) (*pok
 	return &pokercrypto.SRAKey{E: e, D: d, P: ks.prime}, nil
 }
 
-func SplitAndContribute(ownerKey *pokercrypto.SRAKey, numPlayers int) ([]pokercrypto.ShamirShare, int, error) {
+func SplitAndDistribute(ownerKey *pokercrypto.SRAKey, numPlayers int) ([]pokercrypto.ShamirShare, int, error) {
 	if numPlayers < 2 {
 		return nil, 0, fmt.Errorf("")
 	}
