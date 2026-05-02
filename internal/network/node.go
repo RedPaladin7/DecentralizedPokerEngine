@@ -1,10 +1,12 @@
 package network
+
 // "/internal/network/node.go"
 // representation of complete player
 
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/binary"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -35,6 +37,8 @@ type Node struct {
 	peers map[string]ed25519.PublicKey // public key of all the other players
 	started bool 
 
+	bootstrapPeers []string
+
 	OnJoinTable func(*JoinTable, string)
 	OnPlayerReady func(*PlayerReady, string)
 	OnShuffleStep func(*ShuffleStep)
@@ -44,6 +48,8 @@ type Node struct {
 	OnHeartbeat func(*Heartbeat)
 	OnTimeoutVote func(*TimeoutVote)
 	OnHandResult func(*HandResult)
+
+	OnEquivocation func(senderID string, envA, envB *Envelope)
 }
 
 func NewNode(
@@ -53,6 +59,7 @@ func NewNode(
 	sraKey *pokercrypto.SRAKey,
 	listedAddr string,
 	seed []byte,
+	bootstrapPeers[] string,
 ) (*Node, error) {
 	ph, err := NewPokerHost(ctx, listedAddr, seed)
 	if err != nil {
@@ -75,6 +82,7 @@ func NewNode(
 		buyIn: buyIn,
 		sraKey: sraKey,
 		peers: make(map[string]ed25519.PublicKey),
+		bootstrapPeers: bootstrapPeers,
 	}, nil
 }
 
@@ -112,8 +120,15 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	n.Discovery = disc 
 
+	for _, addr := range n.bootstrapPeers {
+		if err := n.Host.Connect(ctx, addr); err != nil {
+			_ = err
+		}
+	}
+
 	// starting the receivers loop
 	go n.receiveLoop(ctx)
+	go n.equivocationScanLoop(ctx)
 	return nil
 }
 
@@ -250,6 +265,40 @@ func (n *Node) publish(ctx context.Context, msgType MsgType, payload []byte) err
 		return fmt.Errorf("")
 	}
 	return n.Gossip.Publish(ctx, frame)
+}
+
+func (n *Node) BroadcastEquivocationEvidence(ctx context.Context, handNum int64, senderID string, envA, envB *Envelope) error {
+	payloadA, err := proto.Marshal(envA)
+	if err != nil {
+		return fmt.Errorf("")
+	}
+	payloadB, err := proto.Marshal(envB)
+	if err != nil {
+		return fmt.Errorf("")
+	}
+	combined := make([]byte, 4+len(payloadA)+4+len(payloadB))
+	binary.BigEndian.PutUint32(combined[0:4], uint32(len(payloadA)))
+	copy(combined[4:], payloadA)
+	binary.BigEndian.PutUint32(combined[4+len(payloadA):], uint32(len(payloadB)))
+	copy(combined[4+len(payloadA)+4:], payloadB)
+	return n.publish(ctx, MsgType_HAND_RESULT, combined)
+}
+
+func (n *Node) equivocationScanLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 *time.Second)
+	defer ticker.Stop() 
+	for {
+		select {
+		case <- ctx.Done():
+			return 
+		case <- ticker.C:
+			adapter := NewGameLogFaultAdaptor(n.Log)
+			senderID, _, _ := adapter.DetectEquivocation()
+			if senderID != "" && n.OnEquivocation != nil {
+				n.OnEquivocation(senderID, nil, nil)
+			}
+		}
+	}
 }
 
 func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {

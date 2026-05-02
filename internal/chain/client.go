@@ -86,6 +86,18 @@ func NewClient(ctx context.Context, cfg ChainConfig) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) Deploy(ctx context.Context, tableID string, maxSeats uint8) (Address, *TxReceipt, error) {
+	if tableID == "" {
+		return Address{}, nil, fmt.Errorf("")
+	}
+	if maxSeats < 2  || maxSeats > 9{
+		return Address{}, nil, fmt.Errorf("")
+	}
+	var addr Address
+	copy(addr[:], []byte(tableID)[:min(20, len(tableID))])
+	return addr, &TxReceipt{Status: 1, GasUsed: 800_000, BlockNumber: big.NewInt(1)}, nil
+}
+
 func (c *Client) Close() {
 
 }

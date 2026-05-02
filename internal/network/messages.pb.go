@@ -24,18 +24,19 @@ const (
 type MsgType int32
 
 const (
-	MsgType_UNKNOWN         MsgType = 0
-	MsgType_JOIN_TABLE      MsgType = 1
-	MsgType_PLAYER_READY    MsgType = 2
-	MsgType_SHUFFLE_STEP    MsgType = 3
-	MsgType_SHUFFLE_COMMIT  MsgType = 4
-	MsgType_PARTIAL_DECRYPT MsgType = 5
-	MsgType_PLAYER_ACTION   MsgType = 6
-	MsgType_GAME_STATE_SYNC MsgType = 7
-	MsgType_HEARTBEAT       MsgType = 8
-	MsgType_TIMEOUT_VOTE    MsgType = 9
-	MsgType_HAND_RESULT     MsgType = 10
-	MsgType_LEAVE_TABLE     MsgType = 11
+	MsgType_UNKNOWN               MsgType = 0
+	MsgType_JOIN_TABLE            MsgType = 1
+	MsgType_PLAYER_READY          MsgType = 2
+	MsgType_SHUFFLE_STEP          MsgType = 3
+	MsgType_SHUFFLE_COMMIT        MsgType = 4
+	MsgType_PARTIAL_DECRYPT       MsgType = 5
+	MsgType_PLAYER_ACTION         MsgType = 6
+	MsgType_GAME_STATE_SYNC       MsgType = 7
+	MsgType_HEARTBEAT             MsgType = 8
+	MsgType_TIMEOUT_VOTE          MsgType = 9
+	MsgType_HAND_RESULT           MsgType = 10
+	MsgType_LEAVE_TABLE           MsgType = 11
+	MsgType_EQUIVOCATION_EVIDENCE MsgType = 12
 )
 
 // Enum value maps for MsgType.
@@ -53,20 +54,22 @@ var (
 		9:  "TIMEOUT_VOTE",
 		10: "HAND_RESULT",
 		11: "LEAVE_TABLE",
+		12: "EQUIVOCATION_EVIDENCE",
 	}
 	MsgType_value = map[string]int32{
-		"UNKNOWN":         0,
-		"JOIN_TABLE":      1,
-		"PLAYER_READY":    2,
-		"SHUFFLE_STEP":    3,
-		"SHUFFLE_COMMIT":  4,
-		"PARTIAL_DECRYPT": 5,
-		"PLAYER_ACTION":   6,
-		"GAME_STATE_SYNC": 7,
-		"HEARTBEAT":       8,
-		"TIMEOUT_VOTE":    9,
-		"HAND_RESULT":     10,
-		"LEAVE_TABLE":     11,
+		"UNKNOWN":               0,
+		"JOIN_TABLE":            1,
+		"PLAYER_READY":          2,
+		"SHUFFLE_STEP":          3,
+		"SHUFFLE_COMMIT":        4,
+		"PARTIAL_DECRYPT":       5,
+		"PLAYER_ACTION":         6,
+		"GAME_STATE_SYNC":       7,
+		"HEARTBEAT":             8,
+		"TIMEOUT_VOTE":          9,
+		"HAND_RESULT":           10,
+		"LEAVE_TABLE":           11,
+		"EQUIVOCATION_EVIDENCE": 12,
 	}
 )
 
@@ -1053,6 +1056,82 @@ func (x *PotResult) GetWinnerIds() []string {
 	return nil
 }
 
+type EquivocationEvidence struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TableId       string                 `protobuf:"bytes,1,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
+	HandNum       int64                  `protobuf:"varint,2,opt,name=hand_num,json=handNum,proto3" json:"hand_num,omitempty"`
+	SenderId      string                 `protobuf:"bytes,3,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`
+	EnvA          *Envelope              `protobuf:"bytes,4,opt,name=env_a,json=envA,proto3" json:"env_a,omitempty"`
+	EnvB          *Envelope              `protobuf:"bytes,5,opt,name=env_b,json=envB,proto3" json:"env_b,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EquivocationEvidence) Reset() {
+	*x = EquivocationEvidence{}
+	mi := &file_internal_network_messages_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EquivocationEvidence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EquivocationEvidence) ProtoMessage() {}
+
+func (x *EquivocationEvidence) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_network_messages_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EquivocationEvidence.ProtoReflect.Descriptor instead.
+func (*EquivocationEvidence) Descriptor() ([]byte, []int) {
+	return file_internal_network_messages_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *EquivocationEvidence) GetTableId() string {
+	if x != nil {
+		return x.TableId
+	}
+	return ""
+}
+
+func (x *EquivocationEvidence) GetHandNum() int64 {
+	if x != nil {
+		return x.HandNum
+	}
+	return 0
+}
+
+func (x *EquivocationEvidence) GetSenderId() string {
+	if x != nil {
+		return x.SenderId
+	}
+	return ""
+}
+
+func (x *EquivocationEvidence) GetEnvA() *Envelope {
+	if x != nil {
+		return x.EnvA
+	}
+	return nil
+}
+
+func (x *EquivocationEvidence) GetEnvB() *Envelope {
+	if x != nil {
+		return x.EnvB
+	}
+	return nil
+}
+
 var File_internal_network_messages_proto protoreflect.FileDescriptor
 
 const file_internal_network_messages_proto_rawDesc = "" +
@@ -1142,7 +1221,13 @@ const file_internal_network_messages_proto_rawDesc = "" +
 	"\tPotResult\x12\x16\n" +
 	"\x06amount\x18\x01 \x01(\x03R\x06amount\x12\x1d\n" +
 	"\n" +
-	"winner_ids\x18\x02 \x03(\tR\twinnerIds*\xde\x01\n" +
+	"winner_ids\x18\x02 \x03(\tR\twinnerIds\"\xb9\x01\n" +
+	"\x14EquivocationEvidence\x12\x19\n" +
+	"\btable_id\x18\x01 \x01(\tR\atableId\x12\x19\n" +
+	"\bhand_num\x18\x02 \x01(\x03R\ahandNum\x12\x1b\n" +
+	"\tsender_id\x18\x03 \x01(\tR\bsenderId\x12&\n" +
+	"\x05env_a\x18\x04 \x01(\v2\x11.network.EnvelopeR\x04envA\x12&\n" +
+	"\x05env_b\x18\x05 \x01(\v2\x11.network.EnvelopeR\x04envB*\xf9\x01\n" +
 	"\aMsgType\x12\v\n" +
 	"\aUNKNOWN\x10\x00\x12\x0e\n" +
 	"\n" +
@@ -1157,7 +1242,8 @@ const file_internal_network_messages_proto_rawDesc = "" +
 	"\fTIMEOUT_VOTE\x10\t\x12\x0f\n" +
 	"\vHAND_RESULT\x10\n" +
 	"\x12\x0f\n" +
-	"\vLEAVE_TABLE\x10\vBBZ@github.com/RedPaladin7/DecentralizedPokerEngine/internal/networkb\x06proto3"
+	"\vLEAVE_TABLE\x10\v\x12\x19\n" +
+	"\x15EQUIVOCATION_EVIDENCE\x10\fBBZ@github.com/RedPaladin7/DecentralizedPokerEngine/internal/networkb\x06proto3"
 
 var (
 	file_internal_network_messages_proto_rawDescOnce sync.Once
@@ -1172,32 +1258,35 @@ func file_internal_network_messages_proto_rawDescGZIP() []byte {
 }
 
 var file_internal_network_messages_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_internal_network_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_internal_network_messages_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_internal_network_messages_proto_goTypes = []any{
-	(MsgType)(0),           // 0: network.MsgType
-	(*Envelope)(nil),       // 1: network.Envelope
-	(*JoinTable)(nil),      // 2: network.JoinTable
-	(*PlayerReady)(nil),    // 3: network.PlayerReady
-	(*ShuffleStep)(nil),    // 4: network.ShuffleStep
-	(*ShuffleCommit)(nil),  // 5: network.ShuffleCommit
-	(*ZKProofWire)(nil),    // 6: network.ZKProofWire
-	(*PartialDecrypt)(nil), // 7: network.PartialDecrypt
-	(*PlayerAction)(nil),   // 8: network.PlayerAction
-	(*GameStateSync)(nil),  // 9: network.GameStateSync
-	(*Heartbeat)(nil),      // 10: network.Heartbeat
-	(*TimeoutVote)(nil),    // 11: network.TimeoutVote
-	(*HandResult)(nil),     // 12: network.HandResult
-	(*PotResult)(nil),      // 13: network.PotResult
+	(MsgType)(0),                 // 0: network.MsgType
+	(*Envelope)(nil),             // 1: network.Envelope
+	(*JoinTable)(nil),            // 2: network.JoinTable
+	(*PlayerReady)(nil),          // 3: network.PlayerReady
+	(*ShuffleStep)(nil),          // 4: network.ShuffleStep
+	(*ShuffleCommit)(nil),        // 5: network.ShuffleCommit
+	(*ZKProofWire)(nil),          // 6: network.ZKProofWire
+	(*PartialDecrypt)(nil),       // 7: network.PartialDecrypt
+	(*PlayerAction)(nil),         // 8: network.PlayerAction
+	(*GameStateSync)(nil),        // 9: network.GameStateSync
+	(*Heartbeat)(nil),            // 10: network.Heartbeat
+	(*TimeoutVote)(nil),          // 11: network.TimeoutVote
+	(*HandResult)(nil),           // 12: network.HandResult
+	(*PotResult)(nil),            // 13: network.PotResult
+	(*EquivocationEvidence)(nil), // 14: network.EquivocationEvidence
 }
 var file_internal_network_messages_proto_depIdxs = []int32{
 	0,  // 0: network.Envelope.type:type_name -> network.MsgType
 	6,  // 1: network.PartialDecrypt.proof:type_name -> network.ZKProofWire
 	13, // 2: network.HandResult.pots:type_name -> network.PotResult
-	3,  // [3:3] is the sub-list for method output_type
-	3,  // [3:3] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	1,  // 3: network.EquivocationEvidence.env_a:type_name -> network.Envelope
+	1,  // 4: network.EquivocationEvidence.env_b:type_name -> network.Envelope
+	5,  // [5:5] is the sub-list for method output_type
+	5,  // [5:5] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_internal_network_messages_proto_init() }
@@ -1211,7 +1300,7 @@ func file_internal_network_messages_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_network_messages_proto_rawDesc), len(file_internal_network_messages_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

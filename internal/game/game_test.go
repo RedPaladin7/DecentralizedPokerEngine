@@ -553,3 +553,26 @@ func TestDealerRotation(t *testing.T) {
 		dealerIdx = (dealerIdx + 1) % len(players)
 	}
 }
+
+func TestStartHandCrypto_RequiresHoleCards(t *testing.T) {
+    m, _ := newTestGame(2, 200)
+    // Don't deal hole cards — should fail
+    err := m.StartHandCrypto()
+    if err == nil {
+        t.Error("expected error when hole cards not populated")
+    }
+}
+
+func TestStartHandCrypto_WithHoleCards(t *testing.T) {
+    m, players := newTestGame(2, 200)
+    // Manually populate hole cards (simulating CryptoGame.DealToEngine)
+    players[0].HoleCards = [2]Card{{Ace, Spades}, {King, Hearts}}
+    players[1].HoleCards = [2]Card{{Queen, Clubs}, {Jack, Diamonds}}
+    err := m.StartHandCrypto()
+    if err != nil {
+        t.Fatalf("StartHandCrypto: %v", err)
+    }
+    if m.State.Phase != PhasePreFlop {
+        t.Errorf("expected PreFlop, got %s", m.State.Phase)
+    }
+}

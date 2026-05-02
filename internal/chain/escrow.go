@@ -38,6 +38,19 @@ func NewEscrowManager(client *Client, localAddr Address, localKey *ecdsa.Private
 	}
 }
 
+func (em *EscrowManager) HostTable(ctx context.Context, tableID string, maxSeats uint8, peerID string, weiAmount *big.Int) (Address, *TxReceipt, error) {
+	addr, receipt, err := em.client.Deploy(ctx, tableID, maxSeats)
+	if err != nil {
+		return Address{}, nil, fmt.Errorf("")
+	}
+	em.client.address = addr.Hex()
+	_, err = em.Join(ctx, peerID, weiAmount)
+	if err != nil {
+		return Address{}, nil, fmt.Errorf("")
+	}
+	return addr, receipt, nil
+}
+
 func (em *EscrowManager) Join(ctx context.Context, peerID string, weiAmount *big.Int) (*TxReceipt, error) {
 	receipt, err := em.client.JoinTable(ctx, peerID, weiAmount)
 	if err != nil {

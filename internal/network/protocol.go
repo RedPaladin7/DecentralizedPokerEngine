@@ -1,4 +1,5 @@
 package network
+
 // "internal/network/protocol.go"
 // sending direct messages
 
@@ -8,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -19,6 +21,18 @@ import (
 const PokerProtocolID = protocol.ID("/poker/1.0.0")
 
 type StreamHandler func(env *Envelope, from peer.ID)
+
+type StreamPool struct {
+	mu sync.Mutex
+	h host.Host
+	streams map[peer.ID]network.Stream
+}
+
+func NewStreamPool(h host.Host) *StreamPool {
+	return &StreamPool{
+		h: h, streams: make(map[peer.ID]network.Stream),
+	}
+}
 
 // receiving direct messages
 // whenever a peer opens a /poker/1.0.0 stream to me, spawn a new go routine per incoming stream

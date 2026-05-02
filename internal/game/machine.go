@@ -413,3 +413,27 @@ func (m *Machine) closestLeftOfDealer(winners []*Player) *Player {
 	}
 	return winners[0]
 }
+
+func (m *Machine) StartHandCrypto() error {
+	if m.State.Phase != PhaseWaiting {
+		return fmt.Errorf("")
+	}
+	if len(m.State.Players) < 2 {
+		return fmt.Errorf("")
+	}
+
+	for _, p := range m.State.Players {
+		if p.HoleCards[0] == (Card{}) || p.HoleCards[1] == (Card{}) {
+			return fmt.Errorf("")
+		}
+	}
+	if err := m.postBlinds(); err != nil {
+		return err
+	}
+	bbIdx := m.bigBlindIndex()
+	m.State.ActionIdx = m.State.nextActiveIndex(bbIdx)
+	m.State.LastRaiserIdx = bbIdx
+	m.State.RoundActionCount = 0 
+	m.State.Phase = PhasePreFlop
+	return nil
+}

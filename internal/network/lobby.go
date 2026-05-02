@@ -193,3 +193,16 @@ func UnmarshalPlayerReady(b []byte) (*PlayerReady, error) {
 	}
 	return msg, nil
 }
+
+func (l *Lobby) SessionNonce() []byte {
+	seats := l.Seats()
+	var combined []byte 
+	for _, s := range seats {
+		combined = append(combined, s.Nonce...)
+	}
+	return combined
+}
+
+func (l *Lobby) CanonicalPlayerOrder() []string {
+	return l.PlayerIDs()
+}

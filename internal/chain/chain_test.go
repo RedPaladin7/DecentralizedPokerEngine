@@ -464,3 +464,47 @@ func makeTestGameState() *game.GameState {
 	gs := game.NewGameState("t1", 1, players, 0, 5, 10)
 	return gs
 }
+
+func TestDeploy_Valid(t *testing.T) {
+    client := testClient(t)
+    addr, receipt, err := client.Deploy(context.Background(), "table-test", 3)
+    if err != nil {
+        t.Fatalf("Deploy: %v", err)
+    }
+    if receipt.Status != 1 {
+        t.Errorf("expected status 1, got %d", receipt.Status)
+    }
+    if addr == (Address{}) {
+        t.Error("expected non-zero address")
+    }
+}
+
+func TestDeploy_InvalidSeats(t *testing.T) {
+    client := testClient(t)
+    _, _, err := client.Deploy(context.Background(), "t", 1)
+    if err == nil {
+        t.Error("expected error for maxSeats=1")
+    }
+}
+
+func TestDeploy_EmptyTableID(t *testing.T) {
+    client := testClient(t)
+    _, _, err := client.Deploy(context.Background(), "", 3)
+    if err == nil {
+        t.Error("expected error for empty tableID")
+    }
+}
+
+func TestEscrowManager_HostTable(t *testing.T) {
+    client := testClient(t)
+    em := NewEscrowManager(client, Address{}, nil, "table-host", 3)
+    wei, _ := EtherToWei("1")
+    addr, receipt, err := em.HostTable(context.Background(), "table-host", 3, "QmHost", wei)
+    if err != nil {
+        t.Fatalf("HostTable: %v", err)
+    }
+    if receipt.Status != 1 {
+        t.Errorf("expected status 1")
+    }
+    _ = addr
+}
