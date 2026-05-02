@@ -29,6 +29,7 @@ type SeatInfo struct {
 	Nonce []byte 
 	IsReady bool
 	JoinedAt time.Time
+	JoinedAtUnixMs int64
 }
 
 // game lobby repr
@@ -53,7 +54,7 @@ func NewLobby(tableID string, maxSeats int) *Lobby {
 
 // new player joining lobby
 // can be used as handler func like described in protocol.go file
-func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string) error {
+func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -75,7 +76,8 @@ func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string) error {
 		BuyIn: msg.BuyIn,
 		SRAKeyE: msg.SraPubKeyE,
 		Nonce: msg.SessionNonce,
-		JoinedAt: time.Now(),
+		JoinedAt: time.UnixMilli(senderTimestamp),
+		JoinedAtUnixMs: senderTimestamp,
 	}
 	return nil
 }
@@ -130,7 +132,10 @@ func (l *Lobby) Seats() []*SeatInfo {
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].JoinedAt.Before(out[j].JoinedAt)
+		if out[i].JoinedAtUnixMs != out[j].JoinedAtUnixMs {
+			return out[i].JoinedAtUnixMs < out[j].JoinedAtUnixMs
+		}
+		return out[i].PlayerID < out[j].PlayerID
 	})
 	return out
 }

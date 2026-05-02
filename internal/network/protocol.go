@@ -89,3 +89,37 @@ func SendDirect(ctx context.Context, h host.Host, peerID peer.ID, frame []byte) 
 	}
 	return nil
 }
+
+func (sp *StreamPool) Send(ctx context.Context, peerID peer.ID, frame []byte) error {
+	sp.mu.Lock()
+	s, ok := sp.streams[peerID]
+	sp.mu.Unlock()
+
+	if !ok {
+		var err error 
+		s, err = sp.h.NewStream(ctx, peerID, PokerProtocolID)
+		if err != nil {
+			return fmt.Errorf("")
+		}
+		sp.mu.Lock()
+		sp.streams[peerID] = s
+		sp.mu.Unlock()
+	}
+
+	if _, err := s.Write(frame); err != nil {
+		sp.mu.Lock()
+		delete(sp.streams, peerID)
+		sp.mu.Unlock()
+		return fmt.Errorf("")
+	}
+	return nil
+}
+
+func (sp *StreamPool) CloseAll() {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	for _, s := range sp.streams {
+		s.Close()
+	}
+	sp.streams = make(map[peer.ID]network.Stream)
+}

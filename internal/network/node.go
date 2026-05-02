@@ -50,6 +50,7 @@ type Node struct {
 	OnHandResult func(*HandResult)
 
 	OnEquivocation func(senderID string, envA, envB *Envelope)
+	streamPool *StreamPool
 }
 
 func NewNode(
@@ -167,7 +168,7 @@ func (n *Node) dispatch(data []byte) {
 		if proto.Unmarshal(env.Payload, msg) != nil {
 			return 
 		}
-		_ = n.Lobby.HandleJoin(msg, env.SenderId)
+		_ = n.Lobby.HandleJoin(msg, env.SenderId, env.Timestamp)
 		if n.OnJoinTable != nil {
 			n.OnJoinTable(msg, env.SenderId)
 		}
@@ -313,7 +314,16 @@ func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {
 	if err != nil {
 		return fmt.Errorf("")
 	}
-	return n.publish(ctx, MsgType_JOIN_TABLE, b)
+	selfTimestamp := time.Now().UnixMilli()
+	_ = n.Lobby.HandleJoin(msg, n.Host.PeerID, selfTimestamp)
+
+	env := NewEnvelope(MsgType_JOIN_TABLE, n.Host.PeerID, n.nextSeq(), b)
+	env.Timestamp = selfTimestamp
+	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
+	if err != nil {
+		return err
+	}
+	return n.Gossip.Publish(ctx, frame)
 }
 
 func (n *Node) BroadcastReady(ctx context.Context, handNum int64) error {
@@ -325,6 +335,7 @@ func (n *Node) BroadcastReady(ctx context.Context, handNum int64) error {
 	if err != nil {
 		return fmt.Errorf("")
 	}
+	_ = n.Lobby.HandleReady(msg, n.Host.PeerID)
 	return n.publish(ctx, MsgType_PLAYER_READY, b)
 }
 
@@ -434,7 +445,7 @@ func (n *Node) SendDirectPartialDecrypt(ctx context.Context, toPeerID peer.ID, h
 	if err != nil {
 		return err 
 	}
-	return SendDirect(ctx, n.Host.Host, toPeerID, frame)
+	return n.streamPool.Send(ctx, toPeerID, frame)
 }
 
 func (n *Node) RegisterPeer(peerID string, pub ed25519.PublicKey) {
@@ -475,4 +486,8 @@ func (n *Node) Close() error {
 	}
 	_ = n.Gossip.Close()
 	return n.Host.Close()
+}
+
+func (n *Node) CloseHandStream() {
+	n.streamPool.CloseAll()
 }

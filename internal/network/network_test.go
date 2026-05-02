@@ -353,20 +353,29 @@ func TestLobby_InvalidBuyIn_Rejected(t *testing.T) {
 }
 
 func TestLobby_PlayerIDs_InJoinOrder(t *testing.T) {
-	l := NewLobby("t1", 3)
-	l.HandleJoin(&JoinTable{PlayerName: "first", BuyIn: 100}, "p1")
-	time.Sleep(time.Millisecond) // ensure distinct timestamps
-	l.HandleJoin(&JoinTable{PlayerName: "second", BuyIn: 100}, "p2")
-	time.Sleep(time.Millisecond)
-	l.HandleJoin(&JoinTable{PlayerName: "third", BuyIn: 100}, "p3")
+    l := NewLobby("t1", 3)
+    // Use explicit timestamps — no sleep needed, no time.Now() nondeterminism
+    l.HandleJoin(&JoinTable{PlayerName: "first",  BuyIn: 100}, "p1", 1000)
+    l.HandleJoin(&JoinTable{PlayerName: "second", BuyIn: 100}, "p2", 2000)
+    l.HandleJoin(&JoinTable{PlayerName: "third",  BuyIn: 100}, "p3", 3000)
 
-	ids := l.PlayerIDs()
-	if len(ids) != 3 {
-		t.Fatalf("expected 3 IDs, got %d", len(ids))
-	}
-	if ids[0] != "p1" || ids[1] != "p2" || ids[2] != "p3" {
-		t.Errorf("unexpected order: %v", ids)
-	}
+    ids := l.PlayerIDs()
+    if ids[0] != "p1" || ids[1] != "p2" || ids[2] != "p3" {
+        t.Errorf("unexpected order: %v", ids)
+    }
+}
+
+func TestLobby_SameTimestamp_PeerIDTiebreaker(t *testing.T) {
+    l := NewLobby("t1", 3)
+    // Same timestamp — PeerID decides order
+    l.HandleJoin(&JoinTable{PlayerName: "z-player", BuyIn: 100}, "zzz-peer", 1000)
+    l.HandleJoin(&JoinTable{PlayerName: "a-player", BuyIn: 100}, "aaa-peer", 1000)
+    l.HandleJoin(&JoinTable{PlayerName: "m-player", BuyIn: 100}, "mmm-peer", 1000)
+
+    ids := l.PlayerIDs()
+    if ids[0] != "aaa-peer" || ids[1] != "mmm-peer" || ids[2] != "zzz-peer" {
+        t.Errorf("expected lexicographic PeerID order, got: %v", ids)
+    }
 }
 
 // ── Replay protection tests ───────────────────────────────────────────────────
