@@ -128,7 +128,7 @@ func (gs *GameState) CurrentPlayer() *Player {
 func (gs *GameState) nextActiveIndex(fromIdx int) int {
 	n := len(gs.Players) 
 	for i := 1; i <= n; i++ {
-		idx := (fromIdx + 1) % n 
+		idx := (fromIdx + i) % n 
 		if gs.Players[idx].CanAct() {
 			return idx 
 		}

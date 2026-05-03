@@ -26,8 +26,9 @@ func ProveDecryption(key *SRAKey, ciphertext, result *big.Int, sessionID []byte)
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
-	if r.Sign() == 0{
-		r.SetInt64(1)
+	for {
+		r, err = rand.Int(rand.Reader, phi)
+		if r.Sign() != 0 {break}
 	}
 
 	A := new(big.Int).Exp(g, r, P)

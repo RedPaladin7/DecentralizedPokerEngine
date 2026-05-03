@@ -64,8 +64,8 @@ func (k *SRAKey) validateMessage(m *big.Int) error {
 		return errors.New("validateMessage: m cannot be nil")
 	}
 	one := big.NewInt(1)
-	pMinus1 := new(big.Int).Sub(k.P, one)
-	if m.Cmp(one) < 0 || m.Cmp(pMinus1) > 0 {
+	pMinus2 := new(big.Int).Sub(k.P, big.NewInt(2))
+	if m.Cmp(one) < 0 || m.Cmp(pMinus2) > 0 {
 		return fmt.Errorf("")
 	}
 	return nil

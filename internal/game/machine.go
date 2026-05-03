@@ -288,7 +288,7 @@ func (m *Machine) bigBlindIndex() int {
 	if n == 2 {
 		return (m.State.DealerIdx + 1) % n
 	}
-	return (m.State.DealerIdx + 2) % 2
+	return (m.State.DealerIdx + 2) % n
 }
 
 func (m *Machine) onlyOneRemaining() bool {

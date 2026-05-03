@@ -118,7 +118,7 @@ contract PokerEscrow {
         _executePayouts(payoutDeltas);
     }
 
-    function submitDisput(
+    function submitDispute(
         address accused,
         string calldata reason,
         bytes calldata evidence,
@@ -135,7 +135,6 @@ contract PokerEscrow {
         state = TableState.Disputed;
         slashEvidence[accused] = evidence;
 
-        emit DisputeFiled(msg.sender, accused, reason);
         emit DisputeFiled(msg.sender, accused, reason);
 
         _executeSlash(accused);

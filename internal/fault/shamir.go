@@ -24,8 +24,8 @@ func NewKeyShareStore(prime *big.Int) *KeyShareStore {
 }
 
 func (ks *KeyShareStore) StoreMyShare(ownerID string, share pokercrypto.ShamirShare) {
-	ks.mu.RLock()
-	defer ks.mu.RUnlock()
+	ks.mu.Lock()
+	defer ks.mu.Unlock()
 	ks.sharesReceived[ownerID] = share
 }
 

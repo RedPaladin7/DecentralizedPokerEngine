@@ -126,10 +126,8 @@ func arrangeSeatRows(panels []string, n int, centre string) []string {
  
 	case n == 4:
 		topRow := lipgloss.JoinHorizontal(lipgloss.Center, panels[3], pad, centre, pad, panels[1])
-		botRow := lipgloss.JoinHorizontal(lipgloss.Center, panels[2], pad, pad, pad, panels[0])
-		_ = botRow
-		midRow := centreRow([]string{panels[2], panels[0]})
-		return []string{topRow, midRow}
+		botRow := centreRow([]string{panels[2], panels[0]})
+		return []string{topRow, botRow}
  
 	case n <= 6:
 		topSeats := panels[3:n]

@@ -84,6 +84,7 @@ func NewNode(
 		sraKey: sraKey,
 		peers: make(map[string]ed25519.PublicKey),
 		bootstrapPeers: bootstrapPeers,
+		streamPool: NewStreamPool(ph.Host),
 	}, nil
 }
 
