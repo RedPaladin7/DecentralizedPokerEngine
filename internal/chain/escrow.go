@@ -9,6 +9,7 @@ import (
 
 	"github.com/RedPaladin7/DecentralizedPokerEngine/internal/fault"
 	"github.com/RedPaladin7/DecentralizedPokerEngine/internal/game"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type EscrowManager struct {
@@ -239,9 +240,12 @@ func signEthereum(privKey *ecdsa.PrivateKey, hash []byte) ([]byte, error) {
 	if len(hash) != 32 {
 		return nil, fmt.Errorf("")
 	}
-	stub := make([]byte, 65)
-	stub[64] = 27 
-	return stub, nil
+	sig, err := crypto.Sign(hash, privKey)
+	if err != nil {
+		return nil, fmt.Errorf("")
+	}
+	sig[64] += 27 
+	return sig, nil
 }
 
 func VerifyOutcomeSignature(

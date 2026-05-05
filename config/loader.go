@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func Load(path string) (*Config, error) {
@@ -75,8 +78,15 @@ func loadJSON(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("loadJSON: read %s: %w", path, err)
 	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		if err := yaml.Unmarshal(b, cfg); err != nil {
+			return fmt.Errorf("")
+		}
+		return nil
+	}
 	if err := json.Unmarshal(b, cfg); err != nil {
-		return fmt.Errorf("loadJSON: unmarshal %s: %w", path, err)
+		return fmt.Errorf("")
 	}
 	return nil
 }

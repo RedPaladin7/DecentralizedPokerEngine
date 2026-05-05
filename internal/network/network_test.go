@@ -30,7 +30,7 @@ func makeTestNode(t *testing.T, tableID, name string) *Node {
 	if err != nil {
 		t.Fatalf("SRAKey for %s: %v", name, err)
 	}
-	n, err := NewNode(ctx, tableID, name, 1000, key, "/ip4/127.0.0.1/tcp/0", nil)
+	n, err := NewNode(ctx, tableID, name, 1000, 6, key, "/ip4/127.0.0.1/tcp/0", nil)
 	if err != nil {
 		t.Fatalf("NewNode %s: %v", name, err)
 	}

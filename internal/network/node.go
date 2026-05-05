@@ -57,11 +57,15 @@ func NewNode(
 	ctx context.Context,
 	tableID, playerName string,
 	buyIn int64,
+	maxSeats int,
 	sraKey *pokercrypto.SRAKey,
 	listedAddr string,
 	seed []byte,
-	bootstrapPeers[] string,
+	bootstrapPeers ...string,
 ) (*Node, error) {
+	if maxSeats < 2 || maxSeats > 9 {
+		maxSeats = 6
+	}
 	ph, err := NewPokerHost(ctx, listedAddr, seed)
 	if err != nil {
 		return nil, fmt.Errorf("")

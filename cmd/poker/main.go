@@ -43,13 +43,17 @@ func main() {
 
 // run is the main entry point for the poker node.
 func run() error {
-	// ── Load configuration ────────────────────────────────────────────────────
 	configPath := ""
+	p2pMode := false
+
 	for i, arg := range os.Args[1:] {
 		if arg == "--config" || arg == "-c" {
 			if i+2 < len(os.Args) {
 				configPath = os.Args[i+2]
 			}
+		}
+		if arg == "--p2p" {
+			p2pMode = true
 		}
 	}
 
@@ -62,10 +66,9 @@ func run() error {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// ── Decide mode ───────────────────────────────────────────────────────────
-	// If network deps are available (libp2p in go.mod), use the full P2P mode.
-	// Otherwise fall back to the local solo mode (useful while building up deps).
-	// The solo mode is also used for testing and CI.
+	if p2pMode {
+		return runP2PMode(ctx, cfg)
+	}
 	return runLocalMode(ctx, cfg)
 }
 

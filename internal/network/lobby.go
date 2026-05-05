@@ -54,7 +54,7 @@ func NewLobby(tableID string, maxSeats int) *Lobby {
 
 // new player joining lobby
 // can be used as handler func like described in protocol.go file
-func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp int64) error {
+func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp ...int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -70,14 +70,20 @@ func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp in
 	if msg.BuyIn <= 0 {
 		return fmt.Errorf("")
 	}
+	var ts int64 
+	if len(senderTimestamp) > 0 {
+		ts = senderTimestamp[0]
+	} else {
+		ts = time.Now().UnixMilli()
+	}
 	l.seats[fromPeerID] = &SeatInfo{
 		PlayerID: fromPeerID,
 		PlayerName: msg.PlayerName,
 		BuyIn: msg.BuyIn,
 		SRAKeyE: msg.SraPubKeyE,
 		Nonce: msg.SessionNonce,
-		JoinedAt: time.UnixMilli(senderTimestamp),
-		JoinedAtUnixMs: senderTimestamp,
+		JoinedAt: time.UnixMilli(ts),
+		JoinedAtUnixMs: ts,
 	}
 	return nil
 }
