@@ -18,95 +18,105 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Every player is both client and server simultaneously
-// Represents a complete player in the game
+// Node represents a complete player in the P2P network.
+// It is both a client (sends messages) and a server (receives messages).
 type Node struct {
-	Host *PokerHost // host responsible for connections, holds private key for signing outgoing messages
-	Gossip *GossipManager // subscribes to table and game topics, and publishes to them
-	Lobby *Lobby // track of who has joined and who is ready
-	Log *Gamelog // append only per hand evidence log
-	Discovery *MDNSDiscovery // discovering new peers with the same tag
+	Host      *PokerHost     // libp2p host — manages connections, peerstore, mux
+	Gossip    *GossipManager // GossipSub publisher/subscriber
+	Lobby     *Lobby         // tracks who has joined and who is ready
+	Log       *Gamelog       // append-only per-hand evidence log
+	Discovery *MDNSDiscovery // LAN peer discovery
 
-	tableID string 
-	playerName string 
-	buyIn int64 
-	sraKey *pokercrypto.SRAKey // complete key pair for the player 
+	tableID    string
+	playerName string
+	buyIn      int64
+	sraKey     *pokercrypto.SRAKey
 
-	seq int64 // monotonic outbound counter, atomic
-	mu sync.RWMutex
-	peers map[string]ed25519.PublicKey // public key of all the other players
-	started bool 
+	seq  int64 // monotonic outbound message counter (atomic)
+	mu   sync.RWMutex
+	peers map[string]ed25519.PublicKey // cached public keys for signature verification
+
+	started bool
 
 	bootstrapPeers []string
 
-	OnJoinTable func(*JoinTable, string)
-	OnPlayerReady func(*PlayerReady, string)
-	OnShuffleStep func(*ShuffleStep)
+	// Callbacks — set these BEFORE calling Start().
+	OnJoinTable      func(*JoinTable, string)
+	OnPlayerReady    func(*PlayerReady, string)
+	OnShuffleStep    func(*ShuffleStep)
 	OnPartialDecrypt func(*PartialDecrypt)
-	OnPlayerAction func(*PlayerAction)
-	OnGameStateSync func(*GameStateSync)
-	OnHeartbeat func(*Heartbeat)
-	OnTimeoutVote func(*TimeoutVote)
-	OnHandResult func(*HandResult)
+	OnPlayerAction   func(*PlayerAction)
+	OnGameStateSync  func(*GameStateSync)
+	OnHeartbeat      func(*Heartbeat)
+	OnTimeoutVote    func(*TimeoutVote)
+	OnHandResult     func(*HandResult)
+	OnEquivocation   func(senderID string, envA, envB *Envelope)
 
-	OnEquivocation func(senderID string, envA, envB *Envelope)
 	streamPool *StreamPool
 }
 
+// NewNode constructs a Node but does NOT start the network.
+// Call Start() after wiring all OnXxx callbacks.
+//
+// FIX: the original code passed maxSeats=9 hardcoded to NewLobby regardless
+// of the configured value, making Lobby.Count() >= maxSeats never trigger for
+// tables smaller than 9.  Now uses the actual maxSeats parameter.
 func NewNode(
 	ctx context.Context,
 	tableID, playerName string,
 	buyIn int64,
 	maxSeats int,
 	sraKey *pokercrypto.SRAKey,
-	listedAddr string,
+	listenAddr string,
 	seed []byte,
 	bootstrapPeers ...string,
 ) (*Node, error) {
 	if maxSeats < 2 || maxSeats > 9 {
 		maxSeats = 6
 	}
-	ph, err := NewPokerHost(ctx, listedAddr, seed)
+	ph, err := NewPokerHost(ctx, listenAddr, seed)
 	if err != nil {
-		return nil, fmt.Errorf("")
+		return nil, fmt.Errorf("NewPokerHost: %w", err)
 	}
 	gm, err := NewGossipManager(ctx, ph.Host, tableID)
 	if err != nil {
 		ph.Close()
-		return nil, fmt.Errorf("")
+		return nil, fmt.Errorf("NewGossipManager: %w", err)
 	}
-
-	// note we don't start the mdns service yet
 	return &Node{
-		Host: ph,
-		Gossip: gm,
-		Lobby: NewLobby(tableID, 9),
-		Log: NewGameLog(tableID, 0),
-		tableID: tableID,
-		playerName: playerName,
-		buyIn: buyIn,
-		sraKey: sraKey,
-		peers: make(map[string]ed25519.PublicKey),
+		Host:           ph,
+		Gossip:         gm,
+		Lobby:          NewLobby(tableID, maxSeats), // FIX: was hardcoded 9
+		Log:            NewGameLog(tableID, 0),
+		tableID:        tableID,
+		playerName:     playerName,
+		buyIn:          buyIn,
+		sraKey:         sraKey,
+		peers:          make(map[string]ed25519.PublicKey),
 		bootstrapPeers: bootstrapPeers,
-		streamPool: NewStreamPool(ph.Host),
+		streamPool:     NewStreamPool(ph.Host),
 	}, nil
 }
 
+// Start begins MDNS discovery, the GossipSub receive loop, and the
+// equivocation scanner.
+//
+// IMPORTANT: Set all OnXxx callbacks before calling Start().
+// The receive goroutine starts immediately and will silently drop any message
+// whose callback is nil at the time the message arrives.
 func (n *Node) Start(ctx context.Context) error {
 	n.mu.Lock()
 	if n.started {
 		n.mu.Unlock()
-		return fmt.Errorf("")
+		return fmt.Errorf("node already started")
 	}
 	n.started = true
 	n.mu.Unlock()
 
-	// setting up direct comm, takes hanlder func => what to do with direct message
-	// direct comm only ever used for partial decrypts
-	RegisterProtocolHandler(n.Host.Host, func(env *Envelope, from peer.ID){
+	// Register the direct-stream handler for partial decrypts.
+	RegisterProtocolHandler(n.Host.Host, func(env *Envelope, from peer.ID) {
 		_ = n.Log.Append(env)
 		if env.Type == MsgType_PARTIAL_DECRYPT && n.OnPartialDecrypt != nil {
-			// calling partial decrypt callback 
 			msg := &PartialDecrypt{}
 			if proto.Unmarshal(env.Payload, msg) == nil {
 				n.OnPartialDecrypt(msg)
@@ -114,64 +124,63 @@ func (n *Node) Start(ctx context.Context) error {
 		}
 	})
 
-	// starting the mdns service
+	// Start MDNS so peers on the same LAN find each other automatically.
 	disc, err := NewMDNSDiscovery(n.Host.Host, func(pi peer.AddrInfo) {
-		n.Host.Host.Peerstore().AddAddrs(pi.ID, pi.Addrs, 10*time.Minute) 
-		// establishing underlying tcp connection with all peers in the peerstore
-		// all other connections are multiplexed over this
+		n.Host.Host.Peerstore().AddAddrs(pi.ID, pi.Addrs, 10*time.Minute)
 		_ = n.Host.Host.Connect(ctx, pi)
 	})
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("MDNSDiscovery: %w", err)
 	}
-	n.Discovery = disc 
+	n.Discovery = disc
 
+	// Connect to any explicitly provided bootstrap peers.
 	for _, addr := range n.bootstrapPeers {
 		if err := n.Host.Connect(ctx, addr); err != nil {
-			_ = err
+			_ = err // non-fatal: mesh will form once both sides are up
 		}
 	}
 
-	// starting the receivers loop
 	go n.receiveLoop(ctx)
 	go n.equivocationScanLoop(ctx)
 	return nil
 }
 
+// receiveLoop reads from the GossipSub table topic and dispatches messages.
 func (n *Node) receiveLoop(ctx context.Context) {
 	for {
 		data, _, err := n.Gossip.NewTableMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return 
+				return
 			}
-			continue 
+			continue
 		}
 		n.dispatch(data)
 	}
 }
 
+// dispatch decodes an envelope and calls the appropriate OnXxx callback.
 func (n *Node) dispatch(data []byte) {
 	env, err := DecodeEnvelope(data, n.lookupPubKey)
 	if err != nil {
-		return 
+		return
 	}
-
+	// Ignore our own messages echoed back by GossipSub.
 	if env.SenderId == n.Host.PeerID {
-		return 
+		return
 	}
-
+	// Replay protection: drop old or duplicate sequence numbers.
 	if err := n.Gossip.CheckAndUpdateSeq(env.SenderId, env.Seq); err != nil {
-		return 
+		return
 	}
-
 	_ = n.Log.Append(env)
 
 	switch env.Type {
 	case MsgType_JOIN_TABLE:
 		msg := &JoinTable{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		_ = n.Lobby.HandleJoin(msg, env.SenderId, env.Timestamp)
 		if n.OnJoinTable != nil {
@@ -181,7 +190,7 @@ func (n *Node) dispatch(data []byte) {
 	case MsgType_PLAYER_READY:
 		msg := &PlayerReady{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		_ = n.Lobby.HandleReady(msg, env.SenderId)
 		if n.OnPlayerReady != nil {
@@ -190,71 +199,71 @@ func (n *Node) dispatch(data []byte) {
 
 	case MsgType_SHUFFLE_STEP:
 		if n.OnShuffleStep == nil {
-			return 
+			return
 		}
 		msg := &ShuffleStep{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnShuffleStep(msg)
 
 	case MsgType_PARTIAL_DECRYPT:
 		if n.OnPartialDecrypt == nil {
-			return 
+			return
 		}
 		msg := &PartialDecrypt{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnPartialDecrypt(msg)
 
 	case MsgType_PLAYER_ACTION:
 		if n.OnPlayerAction == nil {
-			return 
+			return
 		}
 		msg := &PlayerAction{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnPlayerAction(msg)
 
 	case MsgType_GAME_STATE_SYNC:
 		if n.OnGameStateSync == nil {
-			return 
+			return
 		}
 		msg := &GameStateSync{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnGameStateSync(msg)
 
 	case MsgType_HEARTBEAT:
 		if n.OnHeartbeat == nil {
-			return 
+			return
 		}
 		msg := &Heartbeat{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnHeartbeat(msg)
 
 	case MsgType_TIMEOUT_VOTE:
 		if n.OnTimeoutVote == nil {
-			return 
+			return
 		}
 		msg := &TimeoutVote{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnTimeoutVote(msg)
 
 	case MsgType_HAND_RESULT:
 		if n.OnHandResult == nil {
-			return 
+			return
 		}
 		msg := &HandResult{}
 		if proto.Unmarshal(env.Payload, msg) != nil {
-			return 
+			return
 		}
 		n.OnHandResult(msg)
 	}
@@ -268,36 +277,19 @@ func (n *Node) publish(ctx context.Context, msgType MsgType, payload []byte) err
 	env := NewEnvelope(msgType, n.Host.PeerID, n.nextSeq(), payload)
 	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("EncodeEnvelope: %w", err)
 	}
 	return n.Gossip.Publish(ctx, frame)
 }
 
-func (n *Node) BroadcastEquivocationEvidence(ctx context.Context, handNum int64, senderID string, envA, envB *Envelope) error {
-	payloadA, err := proto.Marshal(envA)
-	if err != nil {
-		return fmt.Errorf("")
-	}
-	payloadB, err := proto.Marshal(envB)
-	if err != nil {
-		return fmt.Errorf("")
-	}
-	combined := make([]byte, 4+len(payloadA)+4+len(payloadB))
-	binary.BigEndian.PutUint32(combined[0:4], uint32(len(payloadA)))
-	copy(combined[4:], payloadA)
-	binary.BigEndian.PutUint32(combined[4+len(payloadA):], uint32(len(payloadB)))
-	copy(combined[4+len(payloadA)+4:], payloadB)
-	return n.publish(ctx, MsgType_HAND_RESULT, combined)
-}
-
 func (n *Node) equivocationScanLoop(ctx context.Context) {
-	ticker := time.NewTicker(5 *time.Second)
-	defer ticker.Stop() 
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
 		select {
-		case <- ctx.Done():
-			return 
-		case <- ticker.C:
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 			adapter := NewGameLogFaultAdaptor(n.Log)
 			senderID, _, _ := adapter.DetectEquivocation()
 			if senderID != "" && n.OnEquivocation != nil {
@@ -307,17 +299,19 @@ func (n *Node) equivocationScanLoop(ctx context.Context) {
 	}
 }
 
+// ── Broadcast helpers ─────────────────────────────────────────────────────────
+
 func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {
 	msg := &JoinTable{
-		TableId: n.tableID,
-		PlayerName: n.playerName,
-		BuyIn: n.buyIn,
-		SraPubKeyE: n.sraKey.PublicKey().Bytes(),
+		TableId:      n.tableID,
+		PlayerName:   n.playerName,
+		BuyIn:        n.buyIn,
+		SraPubKeyE:   n.sraKey.PublicKey().Bytes(),
 		SessionNonce: []byte(n.Host.PeerID),
 	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal JoinTable: %w", err)
 	}
 	selfTimestamp := time.Now().UnixMilli()
 	_ = n.Lobby.HandleJoin(msg, n.Host.PeerID, selfTimestamp)
@@ -326,19 +320,16 @@ func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {
 	env.Timestamp = selfTimestamp
 	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
 	if err != nil {
-		return err
+		return fmt.Errorf("EncodeEnvelope join: %w", err)
 	}
 	return n.Gossip.Publish(ctx, frame)
 }
 
 func (n *Node) BroadcastReady(ctx context.Context, handNum int64) error {
-	msg := &PlayerReady{
-		TableId: n.tableID,
-		HandNum: handNum,
-	}
+	msg := &PlayerReady{TableId: n.tableID, HandNum: handNum}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal PlayerReady: %w", err)
 	}
 	_ = n.Lobby.HandleReady(msg, n.Host.PeerID)
 	return n.publish(ctx, MsgType_PLAYER_READY, b)
@@ -346,16 +337,16 @@ func (n *Node) BroadcastReady(ctx context.Context, handNum int64) error {
 
 func (n *Node) BroadcastShuffleStep(ctx context.Context, handNum int64, step *pokercrypto.ShuffleStep) error {
 	msg := &ShuffleStep{
-		TableId: n.tableID,
-		HandNum: handNum,
-		PlayerId: n.Host.PeerID,
-		Deck: DeckToWire(step.OutputDeck),
-		CommitmentHash: step.Commitment.Hash,
+		TableId:         n.tableID,
+		HandNum:         handNum,
+		PlayerId:        n.Host.PeerID,
+		Deck:            DeckToWire(step.OutputDeck),
+		CommitmentHash:  step.Commitment.Hash,
 		CommitmentNonce: step.Commitment.Nonce,
 	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal ShuffleStep: %w", err)
 	}
 	return n.publish(ctx, MsgType_SHUFFLE_STEP, b)
 }
@@ -364,94 +355,104 @@ func (n *Node) BroadcastPartialDecrypt(ctx context.Context, handNum int64, pd *p
 	msg := PartialDecryptToWire(n.tableID, handNum, pd)
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal PartialDecrypt: %w", err)
 	}
 	return n.publish(ctx, MsgType_PARTIAL_DECRYPT, b)
 }
 
 func (n *Node) BroadcastAction(ctx context.Context, handNum int64, a game.Action, actionSeq int64) error {
 	msg := &PlayerAction{
-		TableId: n.tableID,
-		HandNum: handNum,
+		TableId:  n.tableID,
+		HandNum:  handNum,
 		PlayerId: n.Host.PeerID,
-		Action: int32(a.Type),
-		Amount: a.Amount,
-		Seq: actionSeq,
+		Action:   int32(a.Type),
+		Amount:   a.Amount,
+		Seq:      actionSeq,
 	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal PlayerAction: %w", err)
 	}
 	return n.publish(ctx, MsgType_PLAYER_ACTION, b)
 }
 
 func (n *Node) BroadcastHeartbeat(ctx context.Context, handNum, hbSeq int64) error {
-	msg := &Heartbeat{
-		TableId: n.tableID,
-		HandNum: handNum,
-		Seq: hbSeq,
-	}
+	msg := &Heartbeat{TableId: n.tableID, HandNum: handNum, Seq: hbSeq}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal Heartbeat: %w", err)
 	}
 	env := NewEnvelope(MsgType_HEARTBEAT, n.Host.PeerID, n.nextSeq(), b)
 	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
 	if err != nil {
-		return err 
+		return fmt.Errorf("EncodeEnvelope heartbeat: %w", err)
 	}
 	return n.Gossip.PublishHeartbeat(ctx, frame)
 }
 
-func (n *Node) BroadcastTimeoutVote(ctx context.Context, handNum int64, timeOutPeerID string) error {
+func (n *Node) BroadcastTimeoutVote(ctx context.Context, handNum int64, timeoutPeerID string) error {
 	msg := &TimeoutVote{
-		TableId: n.tableID,
-		HandNum: handNum,
-		VotingPlayerId: n.Host.PeerID,
-		TimeoutPlayerId: timeOutPeerID,
+		TableId:         n.tableID,
+		HandNum:         handNum,
+		VotingPlayerId:  n.Host.PeerID,
+		TimeoutPlayerId: timeoutPeerID,
 	}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal TimeoutVote: %w", err)
 	}
 	return n.publish(ctx, MsgType_TIMEOUT_VOTE, b)
 }
 
 func (n *Node) BroadcastHandResult(ctx context.Context, handNum int64, pots []*PotResult, stateRoot []byte) error {
-	msg := &HandResult{
-		TableId: n.tableID,
-		HandNum: handNum,
-		Pots: pots,
-		StateRoot: stateRoot,
-	}
+	msg := &HandResult{TableId: n.tableID, HandNum: handNum, Pots: pots, StateRoot: stateRoot}
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
-		}
+		return fmt.Errorf("marshal HandResult: %w", err)
+	}
 	return n.publish(ctx, MsgType_HAND_RESULT, b)
 }
 
 func (n *Node) BroadcastStateSync(ctx context.Context, sync *GameStateSync) error {
 	b, err := proto.Marshal(sync)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal GameStateSync: %w", err)
 	}
 	return n.publish(ctx, MsgType_GAME_STATE_SYNC, b)
 }
 
-func (n *Node) SendDirectPartialDecrypt(ctx context.Context, toPeerID peer.ID, handNum int64,pd *pokercrypto.PartialDecryption) error {
+func (n *Node) BroadcastEquivocationEvidence(ctx context.Context, handNum int64, senderID string, envA, envB *Envelope) error {
+	payloadA, err := proto.Marshal(envA)
+	if err != nil {
+		return fmt.Errorf("marshal envA: %w", err)
+	}
+	payloadB, err := proto.Marshal(envB)
+	if err != nil {
+		return fmt.Errorf("marshal envB: %w", err)
+	}
+	combined := make([]byte, 4+len(payloadA)+4+len(payloadB))
+	binary.BigEndian.PutUint32(combined[0:4], uint32(len(payloadA)))
+	copy(combined[4:], payloadA)
+	binary.BigEndian.PutUint32(combined[4+len(payloadA):], uint32(len(payloadB)))
+	copy(combined[4+len(payloadA)+4:], payloadB)
+	return n.publish(ctx, MsgType_HAND_RESULT, combined)
+}
+
+func (n *Node) SendDirectPartialDecrypt(ctx context.Context, toPeerID peer.ID, handNum int64, pd *pokercrypto.PartialDecryption) error {
 	msg := PartialDecryptToWire(n.tableID, handNum, pd)
 	b, err := proto.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("")
+		return fmt.Errorf("marshal direct PartialDecrypt: %w", err)
 	}
 	env := NewEnvelope(MsgType_PARTIAL_DECRYPT, n.Host.PeerID, n.nextSeq(), b)
 	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
 	if err != nil {
-		return err 
+		return fmt.Errorf("EncodeEnvelope direct: %w", err)
 	}
 	return n.streamPool.Send(ctx, toPeerID, frame)
 }
+
+// ── Peer management ───────────────────────────────────────────────────────────
 
 func (n *Node) RegisterPeer(peerID string, pub ed25519.PublicKey) {
 	n.mu.Lock()
@@ -473,7 +474,7 @@ func (n *Node) lookupPubKey(peerID string) (ed25519.PublicKey, error) {
 	}
 	pub, err := ExtractEd25519PubKey(pid)
 	if err != nil {
-		return nil, nil
+		return nil, nil // non-fatal: message will be dropped
 	}
 	n.mu.Lock()
 	n.peers[peerID] = pub
