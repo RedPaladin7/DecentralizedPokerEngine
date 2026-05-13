@@ -32,8 +32,8 @@ type Node struct {
 	buyIn      int64
 	sraKey     *pokercrypto.SRAKey
 
-	seq  int64 // monotonic outbound message counter (atomic)
-	mu   sync.RWMutex
+	seq   int64 // monotonic outbound message counter (atomic)
+	mu    sync.RWMutex
 	peers map[string]ed25519.PublicKey // cached public keys for signature verification
 
 	started bool
@@ -47,7 +47,7 @@ type Node struct {
 	OnPartialDecrypt func(*PartialDecrypt)
 	OnPlayerAction   func(*PlayerAction)
 	OnGameStateSync  func(*GameStateSync)
-	OnHeartbeat      func(*Heartbeat)
+	OnHeartbeat      func(*Heartbeat, string)
 	OnTimeoutVote    func(*TimeoutVote)
 	OnHandResult     func(*HandResult)
 	OnEquivocation   func(senderID string, envA, envB *Envelope)
@@ -245,7 +245,7 @@ func (n *Node) dispatch(data []byte) {
 		if proto.Unmarshal(env.Payload, msg) != nil {
 			return
 		}
-		n.OnHeartbeat(msg)
+		n.OnHeartbeat(msg, env.SenderId)
 
 	case MsgType_TIMEOUT_VOTE:
 		if n.OnTimeoutVote == nil {

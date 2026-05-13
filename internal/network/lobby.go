@@ -1,4 +1,5 @@
 package network
+
 // "/internal/network/lobby.go"
 // manages everything that happens before a hand starts
 
@@ -12,43 +13,43 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type LobbyState int 
+type LobbyState int
 
 const (
-	LobbyWaiting LobbyState = iota 
-	LobbyReady 
+	LobbyWaiting LobbyState = iota
+	LobbyReady
 	LobbyPlaying
 )
 
 // info that we have on each player in lobby
 type SeatInfo struct {
-	PlayerID string 
-	PlayerName string 
-	BuyIn int64 
-	SRAKeyE []byte 
-	Nonce []byte 
-	IsReady bool
-	JoinedAt time.Time
+	PlayerID       string
+	PlayerName     string
+	BuyIn          int64
+	SRAKeyE        []byte
+	Nonce          []byte
+	IsReady        bool
+	JoinedAt       time.Time
 	JoinedAtUnixMs int64
 }
 
 // game lobby repr
 type Lobby struct {
-	mu sync.RWMutex
-	tableID string 
-	maxSeats int 
-	seats map[string]*SeatInfo
-	state LobbyState
-	readyCh chan struct{}
-	once sync.Once
+	mu       sync.RWMutex
+	tableID  string
+	maxSeats int
+	seats    map[string]*SeatInfo
+	state    LobbyState
+	readyCh  chan struct{}
+	once     sync.Once
 }
 
 func NewLobby(tableID string, maxSeats int) *Lobby {
 	return &Lobby{
-		tableID: tableID,
+		tableID:  tableID,
 		maxSeats: maxSeats,
-		seats: make(map[string]*SeatInfo),
-		readyCh: make(chan struct{}),
+		seats:    make(map[string]*SeatInfo),
+		readyCh:  make(chan struct{}),
 	}
 }
 
@@ -70,19 +71,19 @@ func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp ..
 	if msg.BuyIn <= 0 {
 		return fmt.Errorf("")
 	}
-	var ts int64 
+	var ts int64
 	if len(senderTimestamp) > 0 {
 		ts = senderTimestamp[0]
 	} else {
 		ts = time.Now().UnixMilli()
 	}
 	l.seats[fromPeerID] = &SeatInfo{
-		PlayerID: fromPeerID,
-		PlayerName: msg.PlayerName,
-		BuyIn: msg.BuyIn,
-		SRAKeyE: msg.SraPubKeyE,
-		Nonce: msg.SessionNonce,
-		JoinedAt: time.UnixMilli(ts),
+		PlayerID:       fromPeerID,
+		PlayerName:     msg.PlayerName,
+		BuyIn:          msg.BuyIn,
+		SRAKeyE:        msg.SraPubKeyE,
+		Nonce:          msg.SessionNonce,
+		JoinedAt:       time.UnixMilli(ts),
 		JoinedAtUnixMs: ts,
 	}
 	return nil
@@ -96,7 +97,7 @@ func (l *Lobby) HandleReady(msg *PlayerReady, fromPeerID string) error {
 	if !ok {
 		return fmt.Errorf("")
 	}
-	seat.IsReady = true 
+	seat.IsReady = true
 	// if all seats are full, close the readyCh
 	l.checkAllReady() // check at every new join
 	return nil
@@ -104,16 +105,16 @@ func (l *Lobby) HandleReady(msg *PlayerReady, fromPeerID string) error {
 
 func (l *Lobby) checkAllReady() {
 	if len(l.seats) < l.maxSeats {
-		return 
+		return
 	}
 	for _, s := range l.seats {
 		if !s.IsReady {
-			return 
+			return
 		}
 	}
 	if l.state == LobbyWaiting {
 		l.state = LobbyReady
-		l.once.Do(func() {close(l.readyCh)})
+		l.once.Do(func() { close(l.readyCh) })
 	}
 }
 
@@ -134,7 +135,7 @@ func (l *Lobby) Seats() []*SeatInfo {
 	// return copy of all seats in order of join time
 	out := make([]*SeatInfo, 0, len(l.seats))
 	for _, s := range l.seats {
-		cp := *s 
+		cp := *s
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -167,6 +168,14 @@ func (l *Lobby) SetPlaying() {
 	l.state = LobbyPlaying
 }
 
+func (l *Lobby) Reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.state = LobbyWaiting
+	l.readyCh = make(chan struct{})
+	l.once = sync.Once{}
+}
+
 func (l *Lobby) State() LobbyState {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -174,7 +183,7 @@ func (l *Lobby) State() LobbyState {
 }
 
 func MarshalJoinTable(msg *JoinTable) ([]byte, error) {
-	b, err := proto.Marshal(msg) 
+	b, err := proto.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -190,7 +199,7 @@ func UnmarshalJoinTable(b []byte) (*JoinTable, error) {
 }
 
 func MarshalPlayerReady(msg *PlayerReady) ([]byte, error) {
-	b, err := proto.Marshal(msg) 
+	b, err := proto.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -207,7 +216,7 @@ func UnmarshalPlayerReady(b []byte) (*PlayerReady, error) {
 
 func (l *Lobby) SessionNonce() []byte {
 	seats := l.Seats()
-	var combined []byte 
+	var combined []byte
 	for _, s := range seats {
 		combined = append(combined, s.Nonce...)
 	}

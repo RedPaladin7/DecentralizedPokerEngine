@@ -229,12 +229,13 @@ func (gm *localGameModel) nextHandCmd() tea.Cmd {
 // P2P SUBCOMMAND ENTRY POINTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-// runHost: poker host [--seats N] [--name NAME] [--table ID] [--listen ADDR]
+// runHost: poker host [--seats N] [--name NAME] [--table ID] [--listen ADDR] [--no-crypto]
 func runHost(args []string) error {
 	cfg, err := config.LoadOrDefault("")
 	if err != nil {
 		return err
 	}
+	noCrypto := false
 	for i := 0; i < len(args)-1; i++ {
 		switch args[i] {
 		case "--seats":
@@ -245,19 +246,22 @@ func runHost(args []string) error {
 			cfg.PlayerName = args[i+1]
 		case "--table":
 			cfg.Game.TableID = args[i+1]
+		case "--no-crypto":
+			noCrypto = true
 		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	return runP2PMode(ctx, cfg)
+	return runP2PMode(ctx, cfg, noCrypto)
 }
 
-// runJoin: poker join --peer MULTIADDR [--name NAME] [--table ID] [--listen ADDR]
+// runJoin: poker join --peer MULTIADDR [--name NAME] [--table ID] [--listen ADDR] [--no-crypto]
 func runJoin(args []string) error {
 	cfg, err := config.LoadOrDefault("")
 	if err != nil {
 		return err
 	}
+	noCrypto := false
 	for i := 0; i < len(args)-1; i++ {
 		switch args[i] {
 		case "--peer":
@@ -268,11 +272,13 @@ func runJoin(args []string) error {
 			cfg.Game.TableID = args[i+1]
 		case "--listen":
 			cfg.Network.ListenAddr = args[i+1]
+		case "--no-crypto":
+			noCrypto = true
 		}
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	return runP2PMode(ctx, cfg)
+	return runP2PMode(ctx, cfg, noCrypto)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +311,7 @@ func runJoin(args []string) error {
 //  5. LOBBY MAX SEATS: node.go was hardcoding NewLobby(tableID, 9) regardless
 //     of the configured MaxSeats — fixed in node.go.
 
-func runP2PMode(ctx context.Context, cfg *config.Config) error {
+func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 
 	// ── Identity + crypto keys ────────────────────────────────────────────────
 	seed, err := cfg.LoadIdentityKey()
@@ -313,9 +319,12 @@ func runP2PMode(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("identity key: %w", err)
 	}
 	prime := pokercrypto.SharedPrime()
-	sraKey, err := pokercrypto.GenerateSRAKey(prime)
-	if err != nil {
-		return fmt.Errorf("SRA key: %w", err)
+	var sraKey *pokercrypto.SRAKey
+	if !noCrypto {
+		sraKey, err = pokercrypto.GenerateSRAKey(prime)
+		if err != nil {
+			return fmt.Errorf("SRA key: %w", err)
+		}
 	}
 
 	// ── Action sequencer (shared between callback goroutine and TUI) ──────────
@@ -380,9 +389,13 @@ func runP2PMode(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 
-	// Heartbeat handler — just acknowledges liveness; detailed fault tracking
-	// could be layered on top but is not required for basic multiplayer.
-	node.OnHeartbeat = func(msg *network.Heartbeat) { /* liveness ack */ }
+	// Heartbeat handler — placeholder, updated later
+	node.OnHeartbeat = func(msg *network.Heartbeat, sender string) { /* updated later */ }
+
+	// Hand result handler — for verification (basic: just log)
+	node.OnHandResult = func(msg *network.HandResult) {
+		fmt.Printf("[hand result] hand %d settled\n", msg.HandNum)
+	}
 
 	// ── Start networking ──────────────────────────────────────────────────────
 	if err := node.Start(ctx); err != nil {
@@ -404,7 +417,9 @@ func runP2PMode(ctx context.Context, cfg *config.Config) error {
 
 	// ── Broadcast join (retry briefly while mesh forms) ───────────────────────
 	for attempt := 0; attempt < 6; attempt++ {
-		if err := node.BroadcastJoin(ctx, 1); err == nil {
+		if err := node.BroadcastJoin(ctx, 1); err != nil {
+			fmt.Printf("[error] broadcast join attempt %d: %v\n", attempt+1, err)
+		} else {
 			break
 		}
 		select {
@@ -430,7 +445,9 @@ waitLoop:
 	}
 
 	fmt.Printf("\nAll %d players present. Broadcasting ready signal…\n", cfg.Game.MaxSeats)
-	_ = node.BroadcastReady(ctx, 1)
+	if err := node.BroadcastReady(ctx, 1); err != nil {
+		fmt.Printf("[error] broadcast ready: %v\n", err)
+	}
 	// Small pause so every node receives each other's ready broadcast.
 	time.Sleep(2 * time.Second)
 
@@ -474,6 +491,11 @@ waitLoop:
 	})
 	fm.RegisterPlayers(node.Lobby.CanonicalPlayerOrder())
 
+	// Update heartbeat handler to use fm
+	node.OnHeartbeat = func(msg *network.Heartbeat, sender string) {
+		fm.RecordHeartbeat(sender)
+	}
+
 	// ── Build and run TUI ─────────────────────────────────────────────────────
 	model := &p2pGameModel{
 		localPeerID: localPeerID,
@@ -491,6 +513,7 @@ waitLoop:
 		seq:         seq,
 		notifyCh:    make(chan struct{}, 16),
 	}
+	model.fm.OnPlayerFolded = model.forceFold
 
 	// Augment the action callback to also poke the TUI notify channel.
 	prevOnAction := node.OnPlayerAction
@@ -611,7 +634,9 @@ func (m *p2pGameModel) applyAndBroadcast(a game.Action) {
 	m.seq.mu.Unlock()
 
 	_ = machine.ApplyAction(a)
-	_ = m.node.BroadcastAction(m.ctx, int64(m.handNum), a, outSeq)
+	if err := m.node.BroadcastAction(m.ctx, int64(m.handNum), a, outSeq); err != nil {
+		fmt.Printf("[error] broadcast action: %v\n", err)
+	}
 
 	// Push a state update into the TUI immediately (don't wait for the
 	// network echo of our own message, which we filter out anyway).
@@ -668,6 +693,23 @@ func (m *p2pGameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Payouts:   msg.State.Payouts,
 			})
 			m.ui = newUI2.(tui.Model)
+			// Broadcast hand result
+			pots := []*network.PotResult{}
+			for _, pot := range msg.State.Pots {
+				winners := []string{}
+				for _, id := range pot.EligibleIDs {
+					if msg.State.Payouts[id] > 0 {
+						winners = append(winners, id)
+					}
+				}
+				pots = append(pots, &network.PotResult{
+					Amount:    pot.Amount,
+					WinnerIds: winners,
+				})
+			}
+			if err := m.node.BroadcastHandResult(m.ctx, int64(m.handNum), pots, []byte{}); err != nil {
+				fmt.Printf("[error] broadcasting hand result: %v\n", err)
+			}
 			return m, tea.Tick(3*time.Second, func(_ time.Time) tea.Msg {
 				return m.startNextHand()
 			})
@@ -723,6 +765,9 @@ func (m *p2pGameModel) startNextHand() tea.Msg {
 	*m.gsPtr = gs
 	m.machineMu.Unlock()
 
+	// Reset lobby for next hand
+	m.node.Lobby.Reset()
+
 	if err := machine.StartHand(); err != nil {
 		return tui.ErrorMsg{Text: err.Error()}
 	}
@@ -730,6 +775,26 @@ func (m *p2pGameModel) startNextHand() tea.Msg {
 }
 
 func (m *p2pGameModel) View() string { return m.ui.View() }
+
+func (m *p2pGameModel) forceFold(peerID string) {
+	m.machineMu.Lock()
+	machine := *m.machinePtr
+	m.machineMu.Unlock()
+	if machine == nil {
+		return
+	}
+	// Find the player and apply fold
+	for _, p := range machine.State.Players {
+		if p.ID == peerID {
+			a := game.Action{PlayerID: peerID, Type: game.ActionFold}
+			_ = machine.ApplyAction(a)
+			if m.prog != nil {
+				m.prog.Send(tui.GameStateMsg{State: machine.State})
+			}
+			break
+		}
+	}
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -797,6 +862,13 @@ USAGE:
   poker init               Generate a default config.yaml
   poker keygen             Generate a new Ethereum private key
   poker version            Print version
+
+FLAGS:
+  --seats N                Max seats (host only)
+  --name NAME              Player name
+  --table ID               Table ID
+  --listen ADDR            Listen address
+  --no-crypto              Disable cryptographic shuffling (plaintext cards)
 
 HOST FLAGS:
   --seats N                Number of seats (2-9, default: from config)
