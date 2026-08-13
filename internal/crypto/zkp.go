@@ -18,6 +18,12 @@ type ZKProof struct {
 var g = big.NewInt(2)
 
 func ProveDecryption(key *SRAKey, ciphertext, result *big.Int, sessionID []byte) (*ZKProof, error) {
+	if key == nil || !key.IsPrivate() {
+		return nil, errors.New("ProveDecryption: private exponent d is not present")
+	}
+	if key.P == nil {
+		return nil, errors.New("ProveDecryption: modulus p is not present")
+	}
 	P := key.P
 	phi := new(big.Int).Sub(P, big.NewInt(1))
 	h := new(big.Int).Exp(g, key.D, P)
@@ -28,7 +34,9 @@ func ProveDecryption(key *SRAKey, ciphertext, result *big.Int, sessionID []byte)
 	}
 	for {
 		r, err = rand.Int(rand.Reader, phi)
-		if r.Sign() != 0 {break}
+		if r.Sign() != 0 {
+			break
+		}
 	}
 
 	A := new(big.Int).Exp(g, r, P)
@@ -75,9 +83,9 @@ func computeChallenge(P, h, ciphertext, result, A, B *big.Int, sessionID []byte)
 	for _, v := range []*big.Int{P, h, ciphertext, result, A, B} {
 		b := v.Bytes()
 		length := make([]byte, 4)
-		length[0] = byte(len(b)>>24)
-		length[1] = byte(len(b)>>16)
-		length[2] = byte(len(b)>>8)
+		length[0] = byte(len(b) >> 24)
+		length[1] = byte(len(b) >> 16)
+		length[2] = byte(len(b) >> 8)
 		length[3] = byte(len(b))
 		hash.Write(length)
 		hash.Write(b)
@@ -92,14 +100,17 @@ func computeChallenge(P, h, ciphertext, result, A, B *big.Int, sessionID []byte)
 }
 
 type PartialDecryption struct {
-	PlayerID string 
-	CardIndex int 
+	PlayerID   string
+	CardIndex  int
 	Ciphertext *big.Int
-	Result *big.Int
-	Proof *ZKProof
+	Result     *big.Int
+	Proof      *ZKProof
 }
 
 func (pd *PartialDecryption) Verify(P *big.Int, sessionID []byte) error {
+	if pd == nil {
+		return errors.New("PartialDecryption.Verify: partial decryption is nil")
+	}
 	if err := VerifyDecryption(pd.Proof, pd.Ciphertext, pd.Result, P, sessionID); err != nil {
 		return fmt.Errorf("")
 	}

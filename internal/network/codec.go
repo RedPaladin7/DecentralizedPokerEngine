@@ -180,6 +180,9 @@ func PartialDecryptToWire(tableID string, handNum int64, pd *pokercrypto.Partial
 }
 
 func PartialDecryptFromWire(w *PartialDecrypt) *pokercrypto.PartialDecryption {
+	if w == nil {
+		return nil
+	}
 	return &pokercrypto.PartialDecryption{
 		PlayerID: w.PlayerId,
 		CardIndex: int(w.CardIndex),
@@ -187,6 +190,92 @@ func PartialDecryptFromWire(w *PartialDecrypt) *pokercrypto.PartialDecryption {
 		Result: BytesToBigInt(w.Result),
 		Proof: ZKProofFromWire(w.Proof),
 	}
+}
+
+// ShuffleMessageFromWire maps a proto ShuffleStep onto the crypto library type.
+// There is no permutation field on the wire.
+func ShuffleMessageFromWire(pb *ShuffleStep) *pokercrypto.ShuffleMessage {
+	if pb == nil {
+		return nil
+	}
+	var commit *pokercrypto.Commitment
+	if len(pb.CommitmentHash) > 0 || len(pb.CommitmentNonce) > 0 {
+		commit = &pokercrypto.Commitment{
+			Hash:  append([]byte(nil), pb.CommitmentHash...),
+			Nonce: append([]byte(nil), pb.CommitmentNonce...),
+		}
+	}
+	return &pokercrypto.ShuffleMessage{
+		HandNum:    pb.HandNum,
+		PlayerID:   pb.PlayerId,
+		OutputDeck: DeckFromWire(pb.Deck),
+		Commitment: commit,
+	}
+}
+
+// ShuffleMessageToWire maps a crypto ShuffleMessage onto proto ShuffleStep.
+func ShuffleMessageToWire(tableID string, msg *pokercrypto.ShuffleMessage) *ShuffleStep {
+	if msg == nil {
+		return nil
+	}
+	var hash, nonce []byte
+	if msg.Commitment != nil {
+		hash = append([]byte(nil), msg.Commitment.Hash...)
+		nonce = append([]byte(nil), msg.Commitment.Nonce...)
+	}
+	return &ShuffleStep{
+		TableId:         tableID,
+		HandNum:         msg.HandNum,
+		PlayerId:        msg.PlayerID,
+		Deck:            DeckToWire(msg.OutputDeck),
+		CommitmentHash:  hash,
+		CommitmentNonce: nonce,
+	}
+}
+
+// PeelMessageFromWire preserves HandNum (PartialDecryptFromWire drops it).
+func PeelMessageFromWire(pb *PartialDecrypt) *pokercrypto.PeelMessage {
+	if pb == nil {
+		return nil
+	}
+	return &pokercrypto.PeelMessage{
+		HandNum:    pb.HandNum,
+		PlayerID:   pb.PlayerId,
+		CardIndex:  int(pb.CardIndex),
+		Ciphertext: BytesToBigInt(pb.Ciphertext),
+		Result:     BytesToBigInt(pb.Result),
+		Proof:      ZKProofFromWire(pb.Proof),
+	}
+}
+
+// PeelMessageToPD copies a PeelMessage into a PartialDecryption for existing send helpers.
+func PeelMessageToPD(msg *pokercrypto.PeelMessage) *pokercrypto.PartialDecryption {
+	if msg == nil {
+		return nil
+	}
+	var proof *pokercrypto.ZKProof
+	if msg.Proof != nil {
+		proof = &pokercrypto.ZKProof{
+			A: copyBigInt(msg.Proof.A),
+			B: copyBigInt(msg.Proof.B),
+			S: copyBigInt(msg.Proof.S),
+			H: copyBigInt(msg.Proof.H),
+		}
+	}
+	return &pokercrypto.PartialDecryption{
+		PlayerID:   msg.PlayerID,
+		CardIndex:  msg.CardIndex,
+		Ciphertext: copyBigInt(msg.Ciphertext),
+		Result:     copyBigInt(msg.Result),
+		Proof:      proof,
+	}
+}
+
+func copyBigInt(n *big.Int) *big.Int {
+	if n == nil {
+		return nil
+	}
+	return new(big.Int).Set(n)
 }
 
 func MarshalPayload(m proto.Message) ([]byte, error) {

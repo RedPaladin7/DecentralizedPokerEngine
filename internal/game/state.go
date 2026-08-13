@@ -12,6 +12,7 @@ const (
 	PhaseRiver
 	PhaseShowdown	
 	PhaseSettled
+	PhaseAwaitingStreet // crypto mode: waiting for ApplyStreet; keep last so existing ints stay stable
 )
 
 func (p Phase) String() string {
@@ -23,6 +24,7 @@ func (p Phase) String() string {
 		"River",
 		"Showdown",
 		"Settled",
+		"Awaiting Street",
 	}[p]
 }
 

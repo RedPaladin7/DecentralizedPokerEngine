@@ -24,6 +24,9 @@ func (m *Machine) StartHand() error {
 	if len(m.State.Players) < 2 {
 		return fmt.Errorf("StartHand: need at least 2 players")
 	}
+	if m.State.Deck == nil {
+		return fmt.Errorf("StartHand: no deck; use StartHandCrypto")
+	}
 
 	m.State.Deck.Shuffle(m.rng)
 
@@ -45,8 +48,9 @@ func (m *Machine) StartHand() error {
 func (m *Machine) ApplyAction (a Action) error {
 	gs := m.State
 	
-	if gs.Phase == PhaseShowdown || gs.Phase == PhaseSettled || gs.Phase == PhaseWaiting {
-		return fmt.Errorf("ApplyAcction: no actions allowed in phase %s", gs.Phase)
+	if gs.Phase == PhaseShowdown || gs.Phase == PhaseSettled ||
+		gs.Phase == PhaseWaiting || gs.Phase == PhaseAwaitingStreet {
+		return fmt.Errorf("ApplyAction: no actions allowed in phase %s", gs.Phase)
 	}
 	
 	current := gs.CurrentPlayer()
@@ -155,6 +159,18 @@ func (m *Machine) endBettingRound() error {
 	gs := m.State
 	gs.Pots = CalculatePots(gs.Players)
 
+	if m.cryptoMode() {
+		switch gs.Phase {
+		case PhasePreFlop, PhaseFlop, PhaseTurn:
+			gs.Phase = PhaseAwaitingStreet
+			return nil
+		case PhaseRiver:
+			return m.startShowdown()
+		default:
+			return fmt.Errorf("endBettingRound: unexpected phase %s", gs.Phase)
+		}
+	}
+
 	switch gs.Phase {
 	case PhasePreFlop:
 		return m.dealFlop()
@@ -170,6 +186,9 @@ func (m *Machine) endBettingRound() error {
 
 func (m *Machine) dealFlop() error {
 	gs := m.State
+	if gs.Deck == nil {
+		return fmt.Errorf("dealFlop: no local deck; use ApplyStreet")
+	}
 	if _, err := gs.Deck.Deal(); err != nil {
 		return err
 	}
@@ -186,6 +205,9 @@ func (m *Machine) dealFlop() error {
 
 func (m *Machine) dealTurn() error {
 	gs := m.State
+	if gs.Deck == nil {
+		return fmt.Errorf("dealTurn: no local deck; use ApplyStreet")
+	}
 	if _, err := gs.Deck.Deal(); err != nil {
 		return err
 	}
@@ -200,6 +222,9 @@ func (m *Machine) dealTurn() error {
 
 func (m *Machine) dealRiver() error {
 	gs := m.State
+	if gs.Deck == nil {
+		return fmt.Errorf("dealRiver: no local deck; use ApplyStreet")
+	}
 	if _, err := gs.Deck.Deal(); err != nil {
 		return err 
 	}
@@ -227,6 +252,9 @@ func (m *Machine) startNewBettingRound() error {
 
 	first := gs.nextActiveIndex(gs.DealerIdx)
 	if first == -1 {
+		if m.cryptoMode() {
+			return m.endBettingRound()
+		}
 		return m.startShowdown()
 	}
 	gs.ActionIdx = first 
@@ -320,11 +348,17 @@ func (m *Machine) startShowdown() error {
 	gs := m.State
 	gs.Phase = PhaseShowdown
 	gs.Pots = CalculatePots(gs.Players)
+	if m.cryptoMode() && m.remainingHolesIncomplete() {
+		return nil
+	}
 	return m.distributePots()
 }
 
 func (m *Machine) distributePots() error {
 	gs := m.State
+	if m.cryptoMode() && m.remainingHolesIncomplete() {
+		return fmt.Errorf("distributePots: remaining hole cards not revealed")
+	}
 	comm := gs.CommunityCards 
 
 	for _, pot := range gs.Pots {
@@ -415,25 +449,192 @@ func (m *Machine) closestLeftOfDealer(winners []*Player) *Player {
 }
 
 func (m *Machine) StartHandCrypto() error {
-	if m.State.Phase != PhaseWaiting {
-		return fmt.Errorf("")
+	gs := m.State
+	if gs.Phase != PhaseWaiting {
+		return fmt.Errorf("StartHandCrypto: expected PhaseWaiting, got %s", gs.Phase)
 	}
-	if len(m.State.Players) < 2 {
-		return fmt.Errorf("")
+	if len(gs.Players) < 2 {
+		return fmt.Errorf("StartHandCrypto: need at least 2 players")
+	}
+	if len(gs.CommunityCards) != 0 {
+		return fmt.Errorf("StartHandCrypto: community cards already dealt")
 	}
 
-	for _, p := range m.State.Players {
-		if p.HoleCards[0] == (Card{}) || p.HoleCards[1] == (Card{}) {
-			return fmt.Errorf("")
-		}
-	}
+	// Cards are inputs in crypto mode. Callers should fill local holes first;
+	// opponent holes stay empty until ApplyHoleReveal at showdown.
+	gs.Deck = nil
+
 	if err := m.postBlinds(); err != nil {
 		return err
 	}
 	bbIdx := m.bigBlindIndex()
-	m.State.ActionIdx = m.State.nextActiveIndex(bbIdx)
-	m.State.LastRaiserIdx = bbIdx
-	m.State.RoundActionCount = 0 
-	m.State.Phase = PhasePreFlop
+	gs.ActionIdx = gs.nextActiveIndex(bbIdx)
+	gs.LastRaiserIdx = bbIdx
+	gs.RoundActionCount = 0
+	gs.Phase = PhasePreFlop
 	return nil
+}
+
+func (m *Machine) cryptoMode() bool {
+	return m.State != nil && m.State.Deck == nil
+}
+
+func holeCardsDealt(p *Player) bool {
+	return p != nil && p.HoleCards[0].dealt() && p.HoleCards[1].dealt()
+}
+
+func pendingStreetCount(nCommunity int) int {
+	switch nCommunity {
+	case 0:
+		return 3
+	case 3, 4:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m *Machine) NeedsStreet() bool {
+	return m.State != nil && m.State.Phase == PhaseAwaitingStreet
+}
+
+func (m *Machine) PendingStreetCount() int {
+	if !m.NeedsStreet() {
+		return 0
+	}
+	return pendingStreetCount(len(m.State.CommunityCards))
+}
+
+func (m *Machine) NeedsReveal() bool {
+	return m.State != nil && m.State.Phase == PhaseShowdown && m.remainingHolesIncomplete()
+}
+
+func (m *Machine) MissingRevealIDs() []string {
+	if m.State == nil {
+		return nil
+	}
+	var ids []string
+	for _, p := range m.State.Players {
+		if p.Status != StatusActive && p.Status != StatusAllIn {
+			continue
+		}
+		if !holeCardsDealt(p) {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
+func (m *Machine) remainingHolesIncomplete() bool {
+	return len(m.MissingRevealIDs()) > 0
+}
+
+func (m *Machine) ApplyStreet(cards []Card) error {
+	if !m.cryptoMode() {
+		return fmt.Errorf("ApplyStreet: not crypto mode")
+	}
+	gs := m.State
+	if gs.Phase != PhaseAwaitingStreet {
+		return fmt.Errorf("ApplyStreet: expected PhaseAwaitingStreet, got %s", gs.Phase)
+	}
+	want := pendingStreetCount(len(gs.CommunityCards))
+	if want == 0 {
+		if len(gs.CommunityCards) >= 5 {
+			return fmt.Errorf("ApplyStreet: board already complete")
+		}
+		return fmt.Errorf("ApplyStreet: unexpected board size %d", len(gs.CommunityCards))
+	}
+	if len(cards) != want {
+		return fmt.Errorf("ApplyStreet: expected %d cards, got %d", want, len(cards))
+	}
+
+	seen := m.knownDealtCards()
+	for i, c := range cards {
+		if !c.dealt() {
+			return fmt.Errorf("ApplyStreet: card %d is not a dealt card", i)
+		}
+		if _, dup := seen[c]; dup {
+			return fmt.Errorf("ApplyStreet: duplicate card %s", c)
+		}
+		seen[c] = struct{}{}
+	}
+
+	gs.CommunityCards = append(gs.CommunityCards, cards...)
+	switch len(gs.CommunityCards) {
+	case 3:
+		gs.Phase = PhaseFlop
+	case 4:
+		gs.Phase = PhaseTurn
+	case 5:
+		gs.Phase = PhaseRiver
+	default:
+		return fmt.Errorf("ApplyStreet: unexpected board size %d after apply", len(gs.CommunityCards))
+	}
+	return m.startNewBettingRound()
+}
+
+func (m *Machine) ApplyHoleReveal(playerID string, cards [2]Card) error {
+	if !m.cryptoMode() {
+		return fmt.Errorf("ApplyHoleReveal: not crypto mode")
+	}
+	gs := m.State
+	if gs.Phase != PhaseShowdown {
+		return fmt.Errorf("ApplyHoleReveal: expected PhaseShowdown, got %s", gs.Phase)
+	}
+	idx := gs.SeatIndex(playerID)
+	if idx == -1 {
+		return fmt.Errorf("ApplyHoleReveal: unknown player %s", playerID)
+	}
+	p := gs.Players[idx]
+	if p.Status != StatusActive && p.Status != StatusAllIn {
+		return fmt.Errorf("ApplyHoleReveal: player %s is not remaining (%s)", playerID, p.Status)
+	}
+	if !cards[0].dealt() || !cards[1].dealt() {
+		return fmt.Errorf("ApplyHoleReveal: cards are not dealt cards")
+	}
+	if cards[0] == cards[1] {
+		return fmt.Errorf("ApplyHoleReveal: duplicate hole card %s", cards[0])
+	}
+
+	if holeCardsDealt(p) {
+		if p.HoleCards[0] == cards[0] && p.HoleCards[1] == cards[1] {
+			if !m.remainingHolesIncomplete() {
+				return m.distributePots()
+			}
+			return nil
+		}
+		return fmt.Errorf("ApplyHoleReveal: equivocation on %s", playerID)
+	}
+
+	seen := m.knownDealtCards()
+	for _, c := range cards {
+		if _, dup := seen[c]; dup {
+			return fmt.Errorf("ApplyHoleReveal: duplicate card %s", c)
+		}
+	}
+	p.HoleCards = cards
+	if !m.remainingHolesIncomplete() {
+		return m.distributePots()
+	}
+	return nil
+}
+
+func (m *Machine) knownDealtCards() map[Card]struct{} {
+	seen := make(map[Card]struct{})
+	if m.State == nil {
+		return seen
+	}
+	for _, c := range m.State.CommunityCards {
+		if c.dealt() {
+			seen[c] = struct{}{}
+		}
+	}
+	for _, p := range m.State.Players {
+		for _, c := range p.HoleCards {
+			if c.dealt() {
+				seen[c] = struct{}{}
+			}
+		}
+	}
+	return seen
 }

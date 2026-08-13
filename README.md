@@ -2,7 +2,7 @@
 
 A peer-to-peer Texas Hold'em poker engine built with cryptographic fairness, decentralized game state synchronization, and optional blockchain-based payments via Ethereum smart contracts.
 
-**Status**: ✅ Basic multiplayer gameplay working | 🏗️ Blockchain integration in progress
+**Status**: LAN mental-poker Hold'em is the default (`poker host` / `poker join`). `--no-crypto` is debug: shared-seed plaintext, all cards visible.
 
 ---
 
@@ -20,7 +20,7 @@ A peer-to-peer Texas Hold'em poker engine built with cryptographic fairness, dec
 - ✅ **Action Synchronization** - GossipSub messaging with sequence numbers ensures all players see identical game state
 - ✅ **Deterministic Outcomes** - All nodes compute winners from synchronized action log
 - ✅ **Timeout Detection** - Automatic heartbeat monitoring and forced folds for non-responsive players
-- ✅ **Plaintext or Cryptographic Dealing** - Optional SRA shuffling protocol for cryptographic fairness
+- ✅ **Cryptographic dealing** - Default SRA shuffle + partial decrypt; opponent hole cards stay hidden until showdown
 
 ### Blockchain (In Development)
 - 🏗️ **Smart Contract Escrow** - Solidity contract for deposit/withdrawal and payout distribution
@@ -197,7 +197,7 @@ Then run:
   --name NAME               # Your player name
   --table ID                # Table identifier
   --listen ADDR             # Custom listen address
-  --no-crypto               # Disable cryptographic shuffling
+  --no-crypto               # Debug: shared-seed plaintext (all cards visible)
 
 # Multiplayer - Join
 ./poker join [flags]
@@ -205,7 +205,7 @@ Then run:
   --name NAME               # Your player name
   --table ID                # Table identifier
   --listen ADDR             # Custom listen address
-  --no-crypto               # Disable cryptographic shuffling
+  --no-crypto               # Debug: shared-seed plaintext (all cards visible)
 ```
 
 ---
@@ -225,7 +225,7 @@ Then run:
 - **Player Manager** - Chip tracking and status
 
 ### Cryptography (`internal/crypto/`)
-- **SRA Protocol** - Secure random shuffling (optional)
+- **SRA Protocol** - Default multi-party shuffle and deal (commutative encryption + ZK peels)
 - **ZKP** - Zero-knowledge proofs for shuffle verification
 - **Shamir Secret Sharing** - Key reconstruction for disputes
 
@@ -296,10 +296,10 @@ DecentralizedPokerEngine/
 - Local bot mode
 - Hand evaluation
 - Multiple hands support
+- Cryptographic dealing (SRA shuffle + peels in `poker host` / `poker join`)
 
 ### 🏗️ In Progress
 - Blockchain payment integration (escrow, payouts, disputes)
-- Cryptographic shuffling (SRA protocol activation)
 - Player reconnection/catch-up
 
 ### ⏳ Future
@@ -324,7 +324,7 @@ Result: Identical game state on all peers ✓
 ```
 
 ### Deterministic Game State
-All peers start with identical seed derived from join order:
+Default multiplayer uses a joint SRA shuffle: peers encrypt-then-permute in seat order, then peel hole cards privately and community cards publicly. `--no-crypto` falls back to a shared seed (all cards visible) for sync debugging:
 ```
 seed = XOR(peer_ids_in_join_order) ⊕ LCG_mix
 all_peers_shuffle(deck, seed) → identical deck permutation
@@ -341,7 +341,7 @@ if (now - last_heartbeat) > timeout:
 
 ## 🐛 Known Limitations
 
-1. **Plaintext Cards** - Default mode has no cryptographic card dealing (use `--no-crypto` to opt in to this)
+1. **2-player milestone** - Crypto dealing is proven for two LAN seats; 9-player WAN is not the claim
 2. **No Reconnection** - Disconnected players can't rejoin mid-game
 3. **No Blockchain** - Blockchain payment integration not yet wired
 4. **LAN Only** - NAT traversal not implemented; works best on local network
@@ -397,7 +397,7 @@ For issues or questions:
 ## 🌟 Highlights
 
 - **Production-Grade Networking** - libp2p + GossipSub handles real-time sync
-- **Fairness Built-In** - Optional SRA shuffling protocol (cryptographic dealing)
+- **Fairness Built-In** - Default SRA shuffle + partial decrypt (cryptographic dealing)
 - **Decentralized** - No central server; peers are equal
 - **Deterministic** - Same input always produces same game outcome
 - **Scalable** - Gossip architecture tolerates latency and packet loss

@@ -302,11 +302,15 @@ func (n *Node) equivocationScanLoop(ctx context.Context) {
 // ── Broadcast helpers ─────────────────────────────────────────────────────────
 
 func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {
+	var eBytes []byte
+	if n.sraKey != nil {
+		eBytes = n.sraKey.PublicKey().Bytes()
+	}
 	msg := &JoinTable{
 		TableId:      n.tableID,
 		PlayerName:   n.playerName,
 		BuyIn:        n.buyIn,
-		SraPubKeyE:   n.sraKey.PublicKey().Bytes(),
+		SraPubKeyE:   eBytes, // nil/empty when --no-crypto
 		SessionNonce: []byte(n.Host.PeerID),
 	}
 	b, err := proto.Marshal(msg)
@@ -347,6 +351,26 @@ func (n *Node) BroadcastShuffleStep(ctx context.Context, handNum int64, step *po
 	b, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal ShuffleStep: %w", err)
+	}
+	return n.publish(ctx, MsgType_SHUFFLE_STEP, b)
+}
+
+// BroadcastShuffleMessage publishes a library ShuffleMessage. It never has
+// access to a permutation — only output deck + commitment go on the wire.
+func (n *Node) BroadcastShuffleMessage(ctx context.Context, msg *pokercrypto.ShuffleMessage) error {
+	if msg == nil {
+		return nil
+	}
+	limb := 0
+	if len(msg.OutputDeck) > 0 && msg.OutputDeck[0] != nil {
+		limb = len(msg.OutputDeck[0].Bytes())
+	}
+	fmt.Printf("[crypto] shuffle hand=%d player=%s deck_cards=%d limb_bytes=%d\n",
+		msg.HandNum, msg.PlayerID, len(msg.OutputDeck), limb)
+	pb := ShuffleMessageToWire(n.tableID, msg)
+	b, err := proto.Marshal(pb)
+	if err != nil {
+		return fmt.Errorf("marshal ShuffleMessage: %w", err)
 	}
 	return n.publish(ctx, MsgType_SHUFFLE_STEP, b)
 }
@@ -436,6 +460,38 @@ func (n *Node) BroadcastEquivocationEvidence(ctx context.Context, handNum int64,
 	binary.BigEndian.PutUint32(combined[4+len(payloadA):], uint32(len(payloadB)))
 	copy(combined[4+len(payloadA)+4:], payloadB)
 	return n.publish(ctx, MsgType_HAND_RESULT, combined)
+}
+
+// SendPeel always gossips the peel. Direct streams to other seats are
+// best-effort; a failure must not fail the hand (duplicates are ignored).
+func (n *Node) SendPeel(ctx context.Context, msg *pokercrypto.PeelMessage) error {
+	if msg == nil {
+		return nil
+	}
+	rb := 0
+	if msg.Result != nil {
+		rb = len(msg.Result.Bytes())
+	}
+	fmt.Printf("[crypto] peel hand=%d player=%s card=%d result_bytes=%d\n",
+		msg.HandNum, msg.PlayerID, msg.CardIndex, rb)
+	pd := PeelMessageToPD(msg)
+	if err := n.BroadcastPartialDecrypt(ctx, msg.HandNum, pd); err != nil {
+		return err
+	}
+	if n.Lobby == nil {
+		return nil
+	}
+	for _, seat := range n.Lobby.Seats() {
+		if seat.PlayerID == n.Host.PeerID {
+			continue
+		}
+		pid, err := PeerIDFromString(seat.PlayerID)
+		if err != nil {
+			continue
+		}
+		_ = n.SendDirectPartialDecrypt(ctx, pid, msg.HandNum, pd)
+	}
+	return nil
 }
 
 func (n *Node) SendDirectPartialDecrypt(ctx context.Context, toPeerID peer.ID, handNum int64, pd *pokercrypto.PartialDecryption) error {

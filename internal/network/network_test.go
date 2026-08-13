@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"sync"
@@ -353,29 +354,141 @@ func TestLobby_InvalidBuyIn_Rejected(t *testing.T) {
 }
 
 func TestLobby_PlayerIDs_InJoinOrder(t *testing.T) {
-    l := NewLobby("t1", 3)
-    // Use explicit timestamps — no sleep needed, no time.Now() nondeterminism
-    l.HandleJoin(&JoinTable{PlayerName: "first",  BuyIn: 100}, "p1", 1000)
-    l.HandleJoin(&JoinTable{PlayerName: "second", BuyIn: 100}, "p2", 2000)
-    l.HandleJoin(&JoinTable{PlayerName: "third",  BuyIn: 100}, "p3", 3000)
+	l := NewLobby("t1", 3)
+	// Use explicit timestamps — no sleep needed, no time.Now() nondeterminism
+	l.HandleJoin(&JoinTable{PlayerName: "first", BuyIn: 100}, "p1", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "second", BuyIn: 100}, "p2", 2000)
+	l.HandleJoin(&JoinTable{PlayerName: "third", BuyIn: 100}, "p3", 3000)
 
-    ids := l.PlayerIDs()
-    if ids[0] != "p1" || ids[1] != "p2" || ids[2] != "p3" {
-        t.Errorf("unexpected order: %v", ids)
-    }
+	ids := l.PlayerIDs()
+	if ids[0] != "p1" || ids[1] != "p2" || ids[2] != "p3" {
+		t.Errorf("unexpected order: %v", ids)
+	}
 }
 
 func TestLobby_SameTimestamp_PeerIDTiebreaker(t *testing.T) {
-    l := NewLobby("t1", 3)
-    // Same timestamp — PeerID decides order
-    l.HandleJoin(&JoinTable{PlayerName: "z-player", BuyIn: 100}, "zzz-peer", 1000)
-    l.HandleJoin(&JoinTable{PlayerName: "a-player", BuyIn: 100}, "aaa-peer", 1000)
-    l.HandleJoin(&JoinTable{PlayerName: "m-player", BuyIn: 100}, "mmm-peer", 1000)
+	l := NewLobby("t1", 3)
+	// Same timestamp — PeerID decides order
+	l.HandleJoin(&JoinTable{PlayerName: "z-player", BuyIn: 100}, "zzz-peer", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "a-player", BuyIn: 100}, "aaa-peer", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "m-player", BuyIn: 100}, "mmm-peer", 1000)
 
-    ids := l.PlayerIDs()
-    if ids[0] != "aaa-peer" || ids[1] != "mmm-peer" || ids[2] != "zzz-peer" {
-        t.Errorf("expected lexicographic PeerID order, got: %v", ids)
-    }
+	ids := l.PlayerIDs()
+	if ids[0] != "aaa-peer" || ids[1] != "mmm-peer" || ids[2] != "zzz-peer" {
+		t.Errorf("expected lexicographic PeerID order, got: %v", ids)
+	}
+}
+
+func TestLobby_StoresSRAPubKeyE(t *testing.T) {
+	l := NewLobby("t1", 2)
+	raw := []byte{0x01, 0x02, 0x03}
+	msg := &JoinTable{PlayerName: "a", BuyIn: 100, SraPubKeyE: raw}
+	if err := l.HandleJoin(msg, "p1"); err != nil {
+		t.Fatalf("HandleJoin: %v", err)
+	}
+	raw[0] = 0xff
+	got := l.Seats()[0].SRAKeyE
+	if !bytes.Equal(got, []byte{0x01, 0x02, 0x03}) {
+		t.Errorf("stored SRAKeyE mutated: got %v", got)
+	}
+}
+
+func TestLobby_PublicExponents_CanonicalOrder(t *testing.T) {
+	l := NewLobby("t1", 3)
+	l.HandleJoin(&JoinTable{PlayerName: "first", BuyIn: 100, SraPubKeyE: []byte{0x01}}, "p1", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "second", BuyIn: 100, SraPubKeyE: []byte{0x02}}, "p2", 2000)
+	l.HandleJoin(&JoinTable{PlayerName: "third", BuyIn: 100, SraPubKeyE: []byte{0x03}}, "p3", 3000)
+
+	ids := l.PlayerIDs()
+	exps := l.PublicExponents()
+	if len(exps) != len(ids) {
+		t.Fatalf("PublicExponents len %d != PlayerIDs len %d", len(exps), len(ids))
+	}
+	want := [][]byte{{0x01}, {0x02}, {0x03}}
+	for i := range ids {
+		if ids[i] != []string{"p1", "p2", "p3"}[i] {
+			t.Fatalf("PlayerIDs order: %v", ids)
+		}
+		if !bytes.Equal(exps[i], want[i]) {
+			t.Errorf("PublicExponents[%d]=%v, want %v", i, exps[i], want[i])
+		}
+	}
+}
+
+func TestLobby_AllSeatsHavePublicE(t *testing.T) {
+	l := NewLobby("t1", 2)
+	l.HandleJoin(&JoinTable{PlayerName: "a", BuyIn: 100, SraPubKeyE: []byte{0x01}}, "p1", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "b", BuyIn: 100, SraPubKeyE: []byte{0x02}}, "p2", 2000)
+	if !l.AllSeatsHavePublicE() {
+		t.Error("expected true when every seat has e")
+	}
+
+	l2 := NewLobby("t1", 2)
+	l2.HandleJoin(&JoinTable{PlayerName: "a", BuyIn: 100, SraPubKeyE: []byte{0x01}}, "p1", 1000)
+	l2.HandleJoin(&JoinTable{PlayerName: "b", BuyIn: 100}, "p2", 2000)
+	if l2.AllSeatsHavePublicE() {
+		t.Error("expected false when one seat has empty e")
+	}
+
+	l3 := NewLobby("t1", 2)
+	l3.HandleJoin(&JoinTable{PlayerName: "a", BuyIn: 100}, "p1", 1000)
+	l3.HandleJoin(&JoinTable{PlayerName: "b", BuyIn: 100}, "p2", 2000)
+	if l3.AllSeatsHavePublicE() {
+		t.Error("expected false when all e are empty")
+	}
+}
+
+func TestKeyringFromLobby_OK(t *testing.T) {
+	p := pokercrypto.SharedPrime()
+	alice, err := pokercrypto.GenerateSRAKey(p)
+	if err != nil {
+		t.Fatalf("alice key: %v", err)
+	}
+	bob, err := pokercrypto.GenerateSRAKey(p)
+	if err != nil {
+		t.Fatalf("bob key: %v", err)
+	}
+
+	l := NewLobby("t1", 2)
+	if err := l.HandleJoin(&JoinTable{PlayerName: "alice", BuyIn: 100, SraPubKeyE: alice.PublicKey().Bytes()}, "alice", 1000); err != nil {
+		t.Fatalf("join alice: %v", err)
+	}
+	if err := l.HandleJoin(&JoinTable{PlayerName: "bob", BuyIn: 100, SraPubKeyE: bob.PublicKey().Bytes()}, "bob", 2000); err != nil {
+		t.Fatalf("join bob: %v", err)
+	}
+
+	kr, err := KeyringFromLobby("alice", alice, l)
+	if err != nil {
+		t.Fatalf("KeyringFromLobby: %v", err)
+	}
+	pub, ok := kr.Public("bob")
+	if !ok {
+		t.Fatal("Public(bob) missing")
+	}
+	if pub.D != nil {
+		t.Error("Public(peer).D is not nil")
+	}
+	localPub, ok := kr.Public("alice")
+	if !ok {
+		t.Fatal("Public(alice) missing")
+	}
+	if localPub.D != nil {
+		t.Error("Public(local).D is not nil")
+	}
+}
+
+func TestKeyringFromLobby_MissingE(t *testing.T) {
+	p := pokercrypto.SharedPrime()
+	alice, err := pokercrypto.GenerateSRAKey(p)
+	if err != nil {
+		t.Fatalf("alice key: %v", err)
+	}
+	l := NewLobby("t1", 2)
+	l.HandleJoin(&JoinTable{PlayerName: "alice", BuyIn: 100, SraPubKeyE: alice.PublicKey().Bytes()}, "alice", 1000)
+	l.HandleJoin(&JoinTable{PlayerName: "bob", BuyIn: 100}, "bob", 2000) // empty e, --no-crypto style
+	if _, err := KeyringFromLobby("alice", alice, l); err == nil {
+		t.Error("expected error when a seat has empty e")
+	}
 }
 
 // ── Replay protection tests ───────────────────────────────────────────────────
@@ -542,6 +655,34 @@ func TestNode_BroadcastAndReceiveAction(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Error("timeout: action not received within 10s")
+	}
+}
+
+func TestNode_BroadcastJoin_NilSRAKey_NoPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	n, err := NewNode(ctx, "nil-sra-test", "Alice", 1000, 6, nil, "/ip4/127.0.0.1/tcp/0", nil)
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if err := n.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { n.Close() })
+
+	if err := n.BroadcastJoin(ctx, 1); err != nil {
+		t.Fatalf("BroadcastJoin: %v", err)
+	}
+	seats := n.Lobby.Seats()
+	if len(seats) != 1 {
+		t.Fatalf("expected 1 local seat, got %d", len(seats))
+	}
+	if len(seats[0].SRAKeyE) != 0 {
+		t.Errorf("expected empty SRAKeyE, got %v", seats[0].SRAKeyE)
 	}
 }
 

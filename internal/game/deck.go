@@ -65,6 +65,10 @@ func (c Card) CardID() int {
 	return int(c.Suit)*13 + int(c.Rank-2)
 }
 
+func (c Card) dealt() bool {
+	return c.Rank >= Two && c.Rank <= Ace && c.Suit <= Clubs
+}
+
 func CardFromID(id int) Card {
 	return Card{
 		Suit: Suit(id/13),
@@ -87,12 +91,18 @@ func NewDeck() *Deck {
 }
 
 func (d *Deck) Shuffle(rng *rand.Rand) {
+	if d == nil || rng == nil {
+		return
+	}
 	rng.Shuffle(len(d.Cards), func(i, j int){
 		d.Cards[i], d.Cards[j] = d.Cards[j], d.Cards[i]
 	})
 }
 
 func (d *Deck) Deal() (Card, error) {
+	if d == nil {
+		return Card{}, fmt.Errorf("Deck.Deal: deck is nil")
+	}
 	if len(d.Cards) == 0 {
 		return Card{}, fmt.Errorf("deck is empty")
 	}
@@ -102,5 +112,8 @@ func (d *Deck) Deal() (Card, error) {
 }
 
 func (d *Deck) Remaining() int {
+	if d == nil {
+		return 0
+	}
 	return len(d.Cards)
 }

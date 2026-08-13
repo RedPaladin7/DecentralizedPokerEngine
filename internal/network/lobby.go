@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	pokercrypto "github.com/RedPaladin7/DecentralizedPokerEngine/internal/crypto"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -77,11 +78,16 @@ func (l *Lobby) HandleJoin(msg *JoinTable, fromPeerID string, senderTimestamp ..
 	} else {
 		ts = time.Now().UnixMilli()
 	}
+	var eBytes []byte
+	if len(msg.SraPubKeyE) > 0 {
+		eBytes = make([]byte, len(msg.SraPubKeyE))
+		copy(eBytes, msg.SraPubKeyE)
+	}
 	l.seats[fromPeerID] = &SeatInfo{
 		PlayerID:       fromPeerID,
 		PlayerName:     msg.PlayerName,
 		BuyIn:          msg.BuyIn,
-		SRAKeyE:        msg.SraPubKeyE,
+		SRAKeyE:        eBytes,
 		Nonce:          msg.SessionNonce,
 		JoinedAt:       time.UnixMilli(ts),
 		JoinedAtUnixMs: ts,
@@ -225,4 +231,56 @@ func (l *Lobby) SessionNonce() []byte {
 
 func (l *Lobby) CanonicalPlayerOrder() []string {
 	return l.PlayerIDs()
+}
+
+// PublicExponents returns each seat's SRA e in canonical order (same as Seats()).
+// Empty SRAKeyE becomes a 0-length slice in the result, not an error.
+func (l *Lobby) PublicExponents() [][]byte {
+	seats := l.Seats()
+	out := make([][]byte, len(seats))
+	for i, s := range seats {
+		if len(s.SRAKeyE) == 0 {
+			out[i] = []byte{}
+			continue
+		}
+		cp := make([]byte, len(s.SRAKeyE))
+		copy(cp, s.SRAKeyE)
+		out[i] = cp
+	}
+	return out
+}
+
+// AllSeatsHavePublicE is true iff every seated player has len(SRAKeyE) > 0.
+func (l *Lobby) AllSeatsHavePublicE() bool {
+	seats := l.Seats()
+	if len(seats) == 0 {
+		return false
+	}
+	for _, s := range seats {
+		if len(s.SRAKeyE) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// KeyringFromLobby snapshots seats and builds a crypto.Keyring.
+// Fails if AllSeatsHavePublicE is false, or if local is not seated / not private.
+func KeyringFromLobby(localID string, local *pokercrypto.SRAKey, lobby *Lobby) (*pokercrypto.Keyring, error) {
+	if lobby == nil {
+		return nil, fmt.Errorf("KeyringFromLobby: lobby is nil")
+	}
+	if !lobby.AllSeatsHavePublicE() {
+		return nil, fmt.Errorf("KeyringFromLobby: not every seat has a public e")
+	}
+	seats := lobby.Seats()
+	order := make([]string, len(seats))
+	pubs := make(map[string][]byte, len(seats))
+	for i, s := range seats {
+		order[i] = s.PlayerID
+		cp := make([]byte, len(s.SRAKeyE))
+		copy(cp, s.SRAKeyE)
+		pubs[s.PlayerID] = cp
+	}
+	return pokercrypto.NewKeyring(localID, local, pubs, order)
 }

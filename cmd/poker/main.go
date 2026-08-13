@@ -229,27 +229,49 @@ func (gm *localGameModel) nextHandCmd() tea.Cmd {
 // P2P SUBCOMMAND ENTRY POINTS
 // ─────────────────────────────────────────────────────────────────────────────
 
+func applyP2PFlags(cfg *config.Config, args []string) bool {
+	noCrypto := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--no-crypto":
+			noCrypto = true
+		case "--seats":
+			if i+1 < len(args) {
+				i++
+				fmt.Sscanf(args[i], "%d", &cfg.Game.MaxSeats)
+			}
+		case "--listen":
+			if i+1 < len(args) {
+				i++
+				cfg.Network.ListenAddr = args[i]
+			}
+		case "--name":
+			if i+1 < len(args) {
+				i++
+				cfg.PlayerName = args[i]
+			}
+		case "--table":
+			if i+1 < len(args) {
+				i++
+				cfg.Game.TableID = args[i]
+			}
+		case "--peer":
+			if i+1 < len(args) {
+				i++
+				cfg.Network.BootstrapPeers = []string{args[i]}
+			}
+		}
+	}
+	return noCrypto
+}
+
 // runHost: poker host [--seats N] [--name NAME] [--table ID] [--listen ADDR] [--no-crypto]
 func runHost(args []string) error {
 	cfg, err := config.LoadOrDefault("")
 	if err != nil {
 		return err
 	}
-	noCrypto := false
-	for i := 0; i < len(args)-1; i++ {
-		switch args[i] {
-		case "--seats":
-			fmt.Sscanf(args[i+1], "%d", &cfg.Game.MaxSeats)
-		case "--listen":
-			cfg.Network.ListenAddr = args[i+1]
-		case "--name":
-			cfg.PlayerName = args[i+1]
-		case "--table":
-			cfg.Game.TableID = args[i+1]
-		case "--no-crypto":
-			noCrypto = true
-		}
-	}
+	noCrypto := applyP2PFlags(cfg, args)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	return runP2PMode(ctx, cfg, noCrypto)
@@ -261,21 +283,7 @@ func runJoin(args []string) error {
 	if err != nil {
 		return err
 	}
-	noCrypto := false
-	for i := 0; i < len(args)-1; i++ {
-		switch args[i] {
-		case "--peer":
-			cfg.Network.BootstrapPeers = []string{args[i+1]}
-		case "--name":
-			cfg.PlayerName = args[i+1]
-		case "--table":
-			cfg.Game.TableID = args[i+1]
-		case "--listen":
-			cfg.Network.ListenAddr = args[i+1]
-		case "--no-crypto":
-			noCrypto = true
-		}
-	}
+	noCrypto := applyP2PFlags(cfg, args)
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	return runP2PMode(ctx, cfg, noCrypto)
@@ -371,8 +379,8 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 		machineMu.Lock()
 		m := liveMachine
 		gs := liveGS
-		machineMu.Unlock()
 		if m == nil {
+			machineMu.Unlock()
 			return
 		}
 		ready := seq.push(msg)
@@ -384,6 +392,7 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 			}
 			_ = m.ApplyAction(a)
 		}
+		machineMu.Unlock()
 		if prog != nil && len(ready) > 0 {
 			prog.Send(tui.GameStateMsg{State: gs})
 		}
@@ -395,6 +404,88 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 	// Hand result handler — for verification (basic: just log)
 	node.OnHandResult = func(msg *network.HandResult) {
 		fmt.Printf("[hand result] hand %d settled\n", msg.HandNum)
+	}
+
+	// Crypto callbacks MUST be set before Start so early SHUFFLE_STEP /
+	// PARTIAL_DECRYPT are not dropped. The session exists only after lobby fill.
+	var cryptoMu sync.Mutex
+	var liveHand *network.CryptoHand
+	var earlyShuffle []*network.ShuffleStep
+	var earlyPeels []*network.PartialDecrypt
+
+	node.OnShuffleStep = func(pb *network.ShuffleStep) {
+		cryptoMu.Lock()
+		h := liveHand
+		if h == nil {
+			if len(earlyShuffle) < 16 {
+				earlyShuffle = append(earlyShuffle, pb)
+			}
+			cryptoMu.Unlock()
+			return
+		}
+		cryptoMu.Unlock()
+		out, err := h.HandleShuffle(network.ShuffleMessageFromWire(pb))
+		if err != nil {
+			fmt.Printf("[crypto] HandleShuffle: %v\n", err)
+			return
+		}
+		for _, msg := range out {
+			if err := node.BroadcastShuffleMessage(ctx, msg); err != nil {
+				fmt.Printf("[error] broadcast shuffle: %v\n", err)
+			}
+		}
+	}
+	node.OnPartialDecrypt = func(pb *network.PartialDecrypt) {
+		cryptoMu.Lock()
+		h := liveHand
+		if h == nil {
+			if len(earlyPeels) < 32 {
+				earlyPeels = append(earlyPeels, pb)
+			}
+			cryptoMu.Unlock()
+			return
+		}
+		cryptoMu.Unlock()
+		out, err := h.HandlePeel(network.PeelMessageFromWire(pb))
+		if err != nil {
+			fmt.Printf("[crypto] HandlePeel: %v\n", err)
+			return
+		}
+		for _, msg := range out {
+			if err := node.SendPeel(ctx, msg); err != nil {
+				fmt.Printf("[error] send peel: %v\n", err)
+			}
+		}
+	}
+
+	installHand := func(h *network.CryptoHand) {
+		cryptoMu.Lock()
+		liveHand = h
+		shuffles := earlyShuffle
+		peels := earlyPeels
+		earlyShuffle = nil
+		earlyPeels = nil
+		cryptoMu.Unlock()
+		for _, pb := range shuffles {
+			out, err := h.HandleShuffle(network.ShuffleMessageFromWire(pb))
+			if err != nil {
+				fmt.Printf("[crypto] drain shuffle: %v\n", err)
+				continue
+			}
+			for _, msg := range out {
+				_ = node.BroadcastShuffleMessage(ctx, msg)
+			}
+		}
+		for _, pb := range peels {
+			out, err := h.HandlePeel(network.PeelMessageFromWire(pb))
+			if err != nil {
+				fmt.Printf("[crypto] drain peel: %v\n", err)
+				continue
+			}
+			for _, msg := range out {
+				_ = node.SendPeel(ctx, msg)
+			}
+		}
 	}
 
 	// ── Start networking ──────────────────────────────────────────────────────
@@ -413,7 +504,9 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 	}
 	fmt.Printf("\nTable : %s   Seats : %d   Buy-in : %d chips\n",
 		cfg.Game.TableID, cfg.Game.MaxSeats, cfg.Game.BuyIn)
-	fmt.Println("\nWaiting for players… (Ctrl-C to quit)\n")
+	fmt.Println()
+	fmt.Println("Waiting for players… (Ctrl-C to quit)")
+	fmt.Println()
 
 	// ── Broadcast join (retry briefly while mesh forms) ───────────────────────
 	for attempt := 0; attempt < 6; attempt++ {
@@ -451,19 +544,13 @@ waitLoop:
 	// Small pause so every node receives each other's ready broadcast.
 	time.Sleep(2 * time.Second)
 
-	// ── FIX 2: derive shared RNG seed from lobby session nonce ────────────────
-	// SessionNonce() returns the concatenation of all peer IDs in join-time
-	// order — identical on every node because every node processed the same
-	// JOIN_TABLE messages through the same lobby.
 	nonce := node.Lobby.SessionNonce()
 	sharedSeed := int64(0)
 	for i, b := range nonce {
 		sharedSeed ^= int64(b) << (uint(i%8) * 8)
 	}
-	// LCG mixing pass for better distribution.
 	sharedSeed = sharedSeed*6364136223846793005 + 1442695040888963407
 
-	// ── Build players from lobby ──────────────────────────────────────────────
 	seats := node.Lobby.Seats()
 	players := make([]*game.Player, len(seats))
 	for i, s := range seats {
@@ -473,10 +560,32 @@ waitLoop:
 	handNum := 1
 	dealerIdx := 0
 
-	// Build game state + machine for hand 1.
-	gs := game.NewGameState(cfg.Game.TableID, handNum, players, dealerIdx,
-		cfg.Game.SmallBlind, cfg.Game.BigBlind)
-	machine := game.NewMachine(gs, rand.New(rand.NewSource(sharedSeed)))
+	var kr *pokercrypto.Keyring
+	var gs *game.GameState
+	var machine *game.Machine
+
+	if noCrypto {
+		fmt.Println("DEBUG  ·  --no-crypto  ·  shared-seed plaintext  ·  all cards visible")
+		gs = game.NewGameState(cfg.Game.TableID, handNum, players, dealerIdx,
+			cfg.Game.SmallBlind, cfg.Game.BigBlind)
+		machine = game.NewMachine(gs, rand.New(rand.NewSource(sharedSeed)))
+	} else {
+		if !node.Lobby.AllSeatsHavePublicE() {
+			return fmt.Errorf("runP2PMode: crypto dealing requires every seat to publish e; a peer joined with --no-crypto")
+		}
+		var err error
+		kr, err = network.KeyringFromLobby(localPeerID, sraKey, node.Lobby)
+		if err != nil {
+			return fmt.Errorf("runP2PMode: %w", err)
+		}
+		fmt.Println("Cryptographic dealing  ·  SRA 2048-bit  ·  opponent holes stay hidden")
+		fmt.Println("Shuffling…")
+		machine, gs, liveHand, err = dealCryptoHand(ctx, node, kr, nonce, handNum, dealerIdx, players, localPeerID, cfg, installHand)
+		if err != nil {
+			return fmt.Errorf("runP2PMode: %w", err)
+		}
+		fmt.Println("Hole cards dealt. Starting table…")
+	}
 
 	machineMu.Lock()
 	liveMachine = machine
@@ -503,6 +612,9 @@ waitLoop:
 		dealerIdx:   dealerIdx,
 		handNum:     handNum,
 		sharedSeed:  sharedSeed,
+		noCrypto:    noCrypto,
+		keyring:     kr,
+		lobbyNonce:  nonce,
 		node:        node,
 		ctx:         ctx,
 		cfg:         cfg,
@@ -510,6 +622,9 @@ waitLoop:
 		machineMu:   &machineMu,
 		machinePtr:  &liveMachine,
 		gsPtr:       &liveGS,
+		cryptoMu:    &cryptoMu,
+		liveHand:    &liveHand,
+		installHand: installHand,
 		seq:         seq,
 		notifyCh:    make(chan struct{}, 16),
 	}
@@ -519,6 +634,7 @@ waitLoop:
 	prevOnAction := node.OnPlayerAction
 	node.OnPlayerAction = func(msg *network.PlayerAction) {
 		prevOnAction(msg)
+		model.kickCryptoAdvance()
 		select {
 		case model.notifyCh <- struct{}{}:
 		default:
@@ -598,6 +714,9 @@ type p2pGameModel struct {
 	dealerIdx   int
 	handNum     int
 	sharedSeed  int64
+	noCrypto    bool
+	keyring     *pokercrypto.Keyring
+	lobbyNonce  []byte
 
 	node *network.Node
 	ctx  context.Context
@@ -611,6 +730,10 @@ type p2pGameModel struct {
 	machinePtr **game.Machine
 	gsPtr      **game.GameState
 
+	cryptoMu    *sync.Mutex
+	liveHand    **network.CryptoHand
+	installHand func(*network.CryptoHand)
+
 	seq      *actionSequencer
 	notifyCh chan struct{}
 }
@@ -621,25 +744,24 @@ func (m *p2pGameModel) applyAndBroadcast(a game.Action) {
 	m.machineMu.Lock()
 	machine := *m.machinePtr
 	gs := *m.gsPtr
-	m.machineMu.Unlock()
 	if machine == nil {
+		m.machineMu.Unlock()
 		return
 	}
 
-	// Assign an outgoing sequence number (local actions are in-order by
-	// construction, so we just take the next slot from the sequencer).
 	m.seq.mu.Lock()
 	outSeq := m.seq.nextSeq
 	m.seq.nextSeq++
 	m.seq.mu.Unlock()
 
 	_ = machine.ApplyAction(a)
+	m.machineMu.Unlock()
+
 	if err := m.node.BroadcastAction(m.ctx, int64(m.handNum), a, outSeq); err != nil {
 		fmt.Printf("[error] broadcast action: %v\n", err)
 	}
+	m.kickCryptoAdvance()
 
-	// Push a state update into the TUI immediately (don't wait for the
-	// network echo of our own message, which we filter out anyway).
 	if m.prog != nil {
 		m.prog.Send(tui.GameStateMsg{State: gs})
 	}
@@ -653,8 +775,10 @@ func (m *p2pGameModel) Init() tea.Cmd {
 			machine := *m.machinePtr
 			gs := *m.gsPtr
 			m.machineMu.Unlock()
-			if err := machine.StartHand(); err != nil {
-				return tui.ErrorMsg{Text: err.Error()}
+			if m.noCrypto {
+				if err := machine.StartHand(); err != nil {
+					return tui.ErrorMsg{Text: err.Error()}
+				}
 			}
 			return tui.GameStateMsg{State: gs}
 		},
@@ -748,29 +872,37 @@ func (m *p2pGameModel) startNextHand() tea.Msg {
 		p.ResetForNewHand()
 	}
 
-	// Mix hand number into seed so each hand shuffles differently but
-	// identically on every node.
-	nextSeed := m.sharedSeed ^ int64(m.handNum)*2654435761
-	rng := rand.New(rand.NewSource(nextSeed))
-
-	gs := game.NewGameState(m.cfg.Game.TableID, m.handNum, m.players,
-		m.dealerIdx, m.cfg.Game.SmallBlind, m.cfg.Game.BigBlind)
-	machine := game.NewMachine(gs, rng)
-
 	m.seq.reset()
+	m.node.Lobby.Reset()
 
-	// Atomic swap — the network callback goroutine reads these under the same lock.
+	var gs *game.GameState
+	var machine *game.Machine
+
+	if m.noCrypto {
+		nextSeed := m.sharedSeed ^ int64(m.handNum)*2654435761
+		rng := rand.New(rand.NewSource(nextSeed))
+		gs = game.NewGameState(m.cfg.Game.TableID, m.handNum, m.players,
+			m.dealerIdx, m.cfg.Game.SmallBlind, m.cfg.Game.BigBlind)
+		machine = game.NewMachine(gs, rng)
+		m.machineMu.Lock()
+		*m.machinePtr = machine
+		*m.gsPtr = gs
+		m.machineMu.Unlock()
+		if err := machine.StartHand(); err != nil {
+			return tui.ErrorMsg{Text: err.Error()}
+		}
+		return tui.GameStateMsg{State: gs}
+	}
+
+	var err error
+	machine, gs, _, err = dealCryptoHand(m.ctx, m.node, m.keyring, m.lobbyNonce, m.handNum, m.dealerIdx, m.players, m.localPeerID, m.cfg, m.installHand)
+	if err != nil {
+		return tui.ErrorMsg{Text: err.Error()}
+	}
 	m.machineMu.Lock()
 	*m.machinePtr = machine
 	*m.gsPtr = gs
 	m.machineMu.Unlock()
-
-	// Reset lobby for next hand
-	m.node.Lobby.Reset()
-
-	if err := machine.StartHand(); err != nil {
-		return tui.ErrorMsg{Text: err.Error()}
-	}
 	return tui.GameStateMsg{State: gs}
 }
 
@@ -779,11 +911,10 @@ func (m *p2pGameModel) View() string { return m.ui.View() }
 func (m *p2pGameModel) forceFold(peerID string) {
 	m.machineMu.Lock()
 	machine := *m.machinePtr
-	m.machineMu.Unlock()
 	if machine == nil {
+		m.machineMu.Unlock()
 		return
 	}
-	// Find the player and apply fold
 	for _, p := range machine.State.Players {
 		if p.ID == peerID {
 			a := game.Action{PlayerID: peerID, Type: game.ActionFold}
@@ -794,6 +925,117 @@ func (m *p2pGameModel) forceFold(peerID string) {
 			break
 		}
 	}
+	m.machineMu.Unlock()
+	m.kickCryptoAdvance()
+}
+
+func (m *p2pGameModel) kickCryptoAdvance() {
+	if m.noCrypto || m.liveHand == nil {
+		return
+	}
+	go func() {
+		m.cryptoMu.Lock()
+		h := *m.liveHand
+		m.cryptoMu.Unlock()
+		if h == nil {
+			return
+		}
+		m.machineMu.Lock()
+		defer m.machineMu.Unlock()
+		machine := *m.machinePtr
+		gs := *m.gsPtr
+		if machine == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
+		defer cancel()
+		err := network.AdvanceCrypto(ctx, h, machine, func(msgs []*pokercrypto.PeelMessage) error {
+			for _, msg := range msgs {
+				if err := m.node.SendPeel(m.ctx, msg); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil && m.prog != nil {
+			m.prog.Send(tui.ErrorMsg{Text: err.Error()})
+			return
+		}
+		if m.prog != nil {
+			m.prog.Send(tui.GameStateMsg{State: gs})
+		}
+	}()
+}
+
+const cryptoDealTimeout = 2 * time.Minute
+
+func dealCryptoHand(
+	ctx context.Context,
+	node *network.Node,
+	kr *pokercrypto.Keyring,
+	nonce []byte,
+	handNum int,
+	dealerIdx int,
+	players []*game.Player,
+	localID string,
+	cfg *config.Config,
+	install func(*network.CryptoHand),
+) (*game.Machine, *game.GameState, *network.CryptoHand, error) {
+	h, err := network.NewCryptoHand(kr, nonce, int64(handNum), dealerIdx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if install != nil {
+		install(h)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, cryptoDealTimeout)
+	defer cancel()
+
+	outs, err := h.StartShuffle()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, msg := range outs {
+		if err := node.BroadcastShuffleMessage(ctx, msg); err != nil {
+			fmt.Printf("[error] broadcast shuffle: %v\n", err)
+		}
+	}
+	if err := h.WaitShuffle(waitCtx); err != nil {
+		return nil, nil, nil, err
+	}
+
+	peels, err := h.StartHoles()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, msg := range peels {
+		if err := node.SendPeel(ctx, msg); err != nil {
+			fmt.Printf("[error] send peel: %v\n", err)
+		}
+	}
+	if err := h.WaitHoles(waitCtx); err != nil {
+		return nil, nil, nil, err
+	}
+
+	holes, err := h.LocalHoles()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	gs := game.NewGameState(cfg.Game.TableID, handNum, players, dealerIdx,
+		cfg.Game.SmallBlind, cfg.Game.BigBlind)
+	for _, p := range gs.Players {
+		if p.ID == localID {
+			p.HoleCards = holes
+		} else {
+			p.HoleCards = [2]game.Card{}
+		}
+	}
+	machine := game.NewMachine(gs, nil)
+	if err := machine.StartHandCrypto(); err != nil {
+		return nil, nil, nil, err
+	}
+	return machine, gs, h, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -868,7 +1110,7 @@ FLAGS:
   --name NAME              Player name
   --table ID               Table ID
   --listen ADDR            Listen address
-  --no-crypto              Disable cryptographic shuffling (plaintext cards)
+  --no-crypto              Debug: shared-seed plaintext dealing (all cards visible; sync testing only)
 
 HOST FLAGS:
   --seats N                Number of seats (2-9, default: from config)

@@ -113,6 +113,120 @@ func TestSRA_EncryptOutOfRange(t *testing.T) {
 	}
 }
 
+func TestPublicSRAKey_Encrypts(t *testing.T) {
+	full, err := GenerateSRAKey(smallPrime)
+	if err != nil {
+		t.Fatalf("GenerateSRAKey: %v", err)
+	}
+	pub, err := PublicSRAKey(smallPrime, full.E)
+	if err != nil {
+		t.Fatalf("PublicSRAKey: %v", err)
+	}
+	m := big.NewInt(2)
+	want, err := full.Encrypt(m)
+	if err != nil {
+		t.Fatalf("full.Encrypt: %v", err)
+	}
+	got, err := pub.Encrypt(m)
+	if err != nil {
+		t.Fatalf("pub.Encrypt: %v", err)
+	}
+	if got.Cmp(want) != 0 {
+		t.Errorf("public encrypt mismatch: got %s, want %s", got, want)
+	}
+}
+
+func TestPublicSRAKey_DecryptErrors(t *testing.T) {
+	full, err := GenerateSRAKey(smallPrime)
+	if err != nil {
+		t.Fatalf("GenerateSRAKey: %v", err)
+	}
+	pub, err := PublicSRAKey(smallPrime, full.E)
+	if err != nil {
+		t.Fatalf("PublicSRAKey: %v", err)
+	}
+	if pub.IsPrivate() {
+		t.Error("public key IsPrivate() == true")
+	}
+	c, err := pub.Encrypt(big.NewInt(2))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if _, err := pub.Decrypt(c); err == nil {
+		t.Error("expected Decrypt error on public-only key")
+	}
+	if _, err := pub.DecryptAll([]*big.Int{c}); err == nil {
+		t.Error("expected DecryptAll error on public-only key")
+	}
+}
+
+func TestPublicSRAKey_VerifyKeyPairFalse(t *testing.T) {
+	full, err := GenerateSRAKey(smallPrime)
+	if err != nil {
+		t.Fatalf("GenerateSRAKey: %v", err)
+	}
+	pub, err := PublicSRAKey(smallPrime, full.E)
+	if err != nil {
+		t.Fatalf("PublicSRAKey: %v", err)
+	}
+	if pub.VerifyKeyPair() {
+		t.Error("public-only VerifyKeyPair() should be false")
+	}
+}
+
+func TestSRAKey_PublicView_HidesD(t *testing.T) {
+	full, err := GenerateSRAKey(smallPrime)
+	if err != nil {
+		t.Fatalf("GenerateSRAKey: %v", err)
+	}
+	origE := new(big.Int).Set(full.E)
+	origD := new(big.Int).Set(full.D)
+	view := full.PublicView()
+	if view.D != nil {
+		t.Error("PublicView().D is not nil")
+	}
+	if full.D == nil || full.D.Cmp(origD) != 0 {
+		t.Error("original D was mutated by PublicView")
+	}
+	view.E.Add(view.E, big.NewInt(1))
+	if full.E.Cmp(origE) != 0 {
+		t.Error("mutating PublicView E changed the original key")
+	}
+}
+
+func TestPublicSRAKey_RejectsNil(t *testing.T) {
+	if _, err := PublicSRAKey(nil, big.NewInt(2)); err == nil {
+		t.Error("expected error for nil p")
+	}
+	if _, err := PublicSRAKey(smallPrime, nil); err == nil {
+		t.Error("expected error for nil e")
+	}
+}
+
+func TestDecrypt_NilKey_NoPanic(t *testing.T) {
+	var k *SRAKey
+	if _, err := k.Decrypt(big.NewInt(2)); err == nil {
+		t.Error("expected error for nil key Decrypt")
+	}
+}
+
+func TestPublicSRAKey_BytesRoundTrip(t *testing.T) {
+	full, err := GenerateSRAKey(testPrime())
+	if err != nil {
+		t.Fatalf("GenerateSRAKey: %v", err)
+	}
+	pub, err := PublicSRAKey(testPrime(), new(big.Int).SetBytes(full.PublicKey().Bytes()))
+	if err != nil {
+		t.Fatalf("PublicSRAKey: %v", err)
+	}
+	if pub.E.Cmp(full.E) != 0 {
+		t.Error("bytes round-trip of PublicKey().Bytes() did not match E")
+	}
+	if pub.IsPrivate() {
+		t.Error("reconstructed public key should not be private")
+	}
+}
+
 // ─── Card encoding tests ──────────────────────────────────────────────────────
 
 func TestCardToField_AllCards(t *testing.T) {
