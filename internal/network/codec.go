@@ -1,4 +1,5 @@
 package network
+
 // "/internal/network/codec.go"
 // Translator layer between go data structures and raw bytes over network
 
@@ -11,6 +12,7 @@ import (
 
 	pokercrypto "github.com/RedPaladin7/DecentralizedPokerEngine/internal/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -21,7 +23,7 @@ func EncodeEnvelope(env *Envelope, privKey ed25519.PrivateKey) ([]byte, error) {
 	sigData := envelopeSignBytes(env)
 	env.Signature = ed25519.Sign(privKey, sigData) // signing contents of data with private key
 
-	b, err := proto.Marshal(env) // struct to bytes 
+	b, err := proto.Marshal(env) // struct to bytes
 	if err != nil {
 		return nil, fmt.Errorf("")
 	}
@@ -30,9 +32,9 @@ func EncodeEnvelope(env *Envelope, privKey ed25519.PrivateKey) ([]byte, error) {
 	}
 
 	frame := make([]byte, 4+len(b)) // adding length of message as prefix
-	binary.BigEndian.PutUint32(frame[:4], uint32(len(b))) 
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(b)))
 	copy(frame[4:], b)
-	return frame,  nil
+	return frame, nil
 }
 
 func DecodeEnvelope(frame []byte, pubKeyFn func(peerID string) (ed25519.PublicKey, error)) (*Envelope, error) {
@@ -70,13 +72,13 @@ func DecodeEnvelope(frame []byte, pubKeyFn func(peerID string) (ed25519.PublicKe
 func envelopeSignBytes(env *Envelope) []byte {
 	// signature type => type + sender + 0x00 + seq + timestamp + payload
 	buf := make([]byte, 0, 1+len(env.SenderId)+1+8+8+len(env.Payload))
-	buf = append(buf, byte(env.Type)) 
+	buf = append(buf, byte(env.Type))
 	buf = append(buf, []byte(env.SenderId)...)
 	buf = append(buf, 0x00)
-	var seq [8]byte 
+	var seq [8]byte
 	binary.BigEndian.PutUint64(seq[:], uint64(env.Seq))
 	buf = append(buf, seq[:]...)
-	var ts [8]byte 
+	var ts [8]byte
 	binary.BigEndian.PutUint64(ts[:], uint64(env.Timestamp))
 	buf = append(buf, ts[:]...)
 	buf = append(buf, env.Payload...)
@@ -153,7 +155,7 @@ func PeerIDFromString(s string) (peer.ID, error) {
 		return "", fmt.Errorf("")
 	}
 	return pid, nil
-} 
+}
 
 func ExtractEd25519PubKey(pid peer.ID) (ed25519.PublicKey, error) {
 	pubKey, err := pid.ExtractPublicKey()
@@ -169,13 +171,13 @@ func ExtractEd25519PubKey(pid peer.ID) (ed25519.PublicKey, error) {
 
 func PartialDecryptToWire(tableID string, handNum int64, pd *pokercrypto.PartialDecryption) *PartialDecrypt {
 	return &PartialDecrypt{
-		TableId:     tableID,
-		HandNum:     handNum,
-		PlayerId:    pd.PlayerID,
-		CardIndex: int32(pd.CardIndex),
+		TableId:    tableID,
+		HandNum:    handNum,
+		PlayerId:   pd.PlayerID,
+		CardIndex:  int32(pd.CardIndex),
 		Ciphertext: BigIntToBytes(pd.Ciphertext),
-		Result: BigIntToBytes(pd.Result),
-		Proof: ZKProofToWire(pd.Proof),
+		Result:     BigIntToBytes(pd.Result),
+		Proof:      ZKProofToWire(pd.Proof),
 	}
 }
 
@@ -184,11 +186,11 @@ func PartialDecryptFromWire(w *PartialDecrypt) *pokercrypto.PartialDecryption {
 		return nil
 	}
 	return &pokercrypto.PartialDecryption{
-		PlayerID: w.PlayerId,
-		CardIndex: int(w.CardIndex),
+		PlayerID:   w.PlayerId,
+		CardIndex:  int(w.CardIndex),
 		Ciphertext: BytesToBigInt(w.Ciphertext),
-		Result: BytesToBigInt(w.Result),
-		Proof: ZKProofFromWire(w.Proof),
+		Result:     BytesToBigInt(w.Result),
+		Proof:      ZKProofFromWire(w.Proof),
 	}
 }
 
@@ -269,6 +271,119 @@ func PeelMessageToPD(msg *pokercrypto.PeelMessage) *pokercrypto.PartialDecryptio
 		Result:     copyBigInt(msg.Result),
 		Proof:      proof,
 	}
+}
+
+// KeyShare is a Shamir share of a player's private exponent d.
+// Marshaled with proto3 wire encoding (compatible with messages.proto).
+type KeyShare struct {
+	TableId string
+	HandNum int64
+	OwnerId string
+	Index   int32
+	Value   []byte
+}
+
+func KeyShareToWire(tableID string, handNum int64, ownerID string, share pokercrypto.ShamirShare) *KeyShare {
+	return &KeyShare{
+		TableId: tableID,
+		HandNum: handNum,
+		OwnerId: ownerID,
+		Index:   int32(share.Index),
+		Value:   BigIntToBytes(share.Value),
+	}
+}
+
+func KeyShareFromWire(w *KeyShare) pokercrypto.ShamirShare {
+	if w == nil {
+		return pokercrypto.ShamirShare{}
+	}
+	return pokercrypto.ShamirShare{
+		Index: int(w.Index),
+		Value: BytesToBigInt(w.Value),
+	}
+}
+
+func MarshalKeyShare(msg *KeyShare) ([]byte, error) {
+	if msg == nil {
+		return nil, fmt.Errorf("MarshalKeyShare: nil")
+	}
+	var b []byte
+	if msg.TableId != "" {
+		b = protowire.AppendTag(b, 1, protowire.BytesType)
+		b = protowire.AppendString(b, msg.TableId)
+	}
+	if msg.HandNum != 0 {
+		b = protowire.AppendTag(b, 2, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(msg.HandNum))
+	}
+	if msg.OwnerId != "" {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendString(b, msg.OwnerId)
+	}
+	if msg.Index != 0 {
+		b = protowire.AppendTag(b, 4, protowire.VarintType)
+		b = protowire.AppendVarint(b, uint64(msg.Index))
+	}
+	if len(msg.Value) > 0 {
+		b = protowire.AppendTag(b, 5, protowire.BytesType)
+		b = protowire.AppendBytes(b, msg.Value)
+	}
+	return b, nil
+}
+
+func UnmarshalKeyShare(b []byte) (*KeyShare, error) {
+	msg := &KeyShare{}
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return nil, fmt.Errorf("UnmarshalKeyShare: bad tag")
+		}
+		b = b[n:]
+		switch {
+		case num == 1 && typ == protowire.BytesType:
+			s, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: table_id")
+			}
+			msg.TableId = s
+			b = b[n:]
+		case num == 2 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: hand_num")
+			}
+			msg.HandNum = int64(v)
+			b = b[n:]
+		case num == 3 && typ == protowire.BytesType:
+			s, n := protowire.ConsumeString(b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: owner_id")
+			}
+			msg.OwnerId = s
+			b = b[n:]
+		case num == 4 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: index")
+			}
+			msg.Index = int32(v)
+			b = b[n:]
+		case num == 5 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: value")
+			}
+			msg.Value = append([]byte(nil), v...)
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return nil, fmt.Errorf("UnmarshalKeyShare: skip field")
+			}
+			b = b[n:]
+		}
+	}
+	return msg, nil
 }
 
 func copyBigInt(n *big.Int) *big.Int {

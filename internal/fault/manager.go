@@ -12,28 +12,28 @@ import (
 )
 
 type FaultManager struct {
-	mu sync.RWMutex
-	cfg FaultConfig 
-	handNum int64 
-	localPeerID string 
-	playerIDs []string 
-	heartbeat *HeartbeatMonitor
-	timeouts *TimeoutManager
-	keyShares *KeyShareStore
+	mu            sync.RWMutex
+	cfg           FaultConfig
+	handNum       int64
+	localPeerID   string
+	playerIDs     []string
+	heartbeat     *HeartbeatMonitor
+	timeouts      *TimeoutManager
+	keyShares     *KeyShareStore
 	slashDetector *SlashDetector
 
-	OnPlayerFolded func(peerID string)
-	OnKeyShareNeeded func(ownerID string, share pokercrypto.ShamirShare)
-	OnSlash func(record *SlashRecord)
+	OnPlayerFolded      func(peerID string)
+	OnKeyShareNeeded    func(ownerID string, share pokercrypto.ShamirShare)
+	OnSlash             func(record *SlashRecord)
 	OnTimeoutVoteNeeded func(targetPeerID string)
 }
 
 type FaultConfig struct {
-	HeartbeatInterval time.Duration 
-	HeartbeatTimeout time.Duration
-	VoteExpiry time.Duration
-	ShamirThreshold int 
-	Prime *big.Int
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
+	VoteExpiry        time.Duration
+	ShamirThreshold   int
+	Prime             *big.Int
 }
 
 func NewFaultManager(localPeerID string, handNum int64, cfg FaultConfig) *FaultManager {
@@ -45,17 +45,17 @@ func NewFaultManager(localPeerID string, handNum int64, cfg FaultConfig) *FaultM
 	}
 	if cfg.VoteExpiry == 0 {
 		cfg.VoteExpiry = 30 * time.Second
-	} 
+	}
 	if cfg.Prime == nil {
 		cfg.Prime = pokercrypto.SharedPrime()
 	}
 
 	fm := &FaultManager{
-		cfg: cfg,
-		handNum: handNum,
-		localPeerID: localPeerID,
-		heartbeat: NewHeartbeatMonitor(cfg.HeartbeatTimeout),
-		keyShares: NewKeyShareStore(cfg.Prime),
+		cfg:           cfg,
+		handNum:       handNum,
+		localPeerID:   localPeerID,
+		heartbeat:     NewHeartbeatMonitor(cfg.HeartbeatTimeout),
+		keyShares:     NewKeyShareStore(cfg.Prime),
 		slashDetector: NewSlashDetector(handNum),
 	}
 
@@ -73,13 +73,27 @@ func NewFaultManager(localPeerID string, handNum int64, cfg FaultConfig) *FaultM
 	return fm
 }
 
+func (fm *FaultManager) SetHandNum(handNum int64) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	fm.handNum = handNum
+}
+
+func (fm *FaultManager) SetShamirThreshold(t int) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+	if t >= 2 {
+		fm.cfg.ShamirThreshold = t
+	}
+}
+
 func (fm *FaultManager) RegisterPlayers(playerIDs []string) {
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
 
 	fm.playerIDs = playerIDs
 	for _, id := range playerIDs {
-		if id != fm.localPeerID{
+		if id != fm.localPeerID {
 			fm.heartbeat.RegisterPeer(id)
 		}
 	}
@@ -94,7 +108,7 @@ func (fm *FaultManager) RegisterPlayers(playerIDs []string) {
 	}
 
 	if fm.cfg.ShamirThreshold == 0 {
-		fm.cfg.ShamirThreshold = (n + 1) / 2 
+		fm.cfg.ShamirThreshold = (n + 1) / 2
 		if fm.cfg.ShamirThreshold < 2 {
 			fm.cfg.ShamirThreshold = 2
 		}
@@ -109,7 +123,7 @@ func (fm *FaultManager) HandleTimeoutVote(targetPeerID, voterPeerID string, yes 
 	fm.mu.RLock()
 	tm := fm.timeouts
 	fm.mu.RUnlock()
-	if tm ==  nil {
+	if tm == nil {
 		return VotePending, fmt.Errorf("")
 	}
 	return tm.RecordVote(targetPeerID, voterPeerID, yes)
@@ -117,7 +131,7 @@ func (fm *FaultManager) HandleTimeoutVote(targetPeerID, voterPeerID string, yes 
 
 func (fm *FaultManager) StartTimeoutVote(targetPeerID string) {
 	fm.mu.RLock()
-	tm := fm.timeouts 
+	tm := fm.timeouts
 	fm.mu.RUnlock()
 	if tm != nil {
 		tm.StartVote(targetPeerID, fm.localPeerID)
@@ -134,7 +148,7 @@ func (fm *FaultManager) StoreKeyShare(ownerID string, share pokercrypto.ShamirSh
 func (fm *FaultManager) BroadcastMyShareFor(ownerID string) {
 	share, ok := fm.keyShares.ContributeShare(ownerID)
 	if !ok {
-		return 
+		return
 	}
 	if fm.OnKeyShareNeeded != nil {
 		fm.OnKeyShareNeeded(ownerID, share)
@@ -203,7 +217,7 @@ func (fm *FaultManager) IsSlashed(peerID string) bool {
 }
 
 func ApplyTimeoutFold(gs *game.GameState, peerID string) (game.Action, error) {
-	idx := gs.SeatIndex(peerID) 
+	idx := gs.SeatIndex(peerID)
 	if idx == -1 {
 		return game.Action{}, fmt.Errorf("")
 	}

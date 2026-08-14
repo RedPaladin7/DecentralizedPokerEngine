@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -320,6 +321,9 @@ func runJoin(args []string) error {
 //     of the configured MaxSeats — fixed in node.go.
 
 func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
+	if err := requireP2PSeats(cfg.Game.MaxSeats); err != nil {
+		return err
+	}
 
 	// ── Identity + crypto keys ────────────────────────────────────────────────
 	seed, err := cfg.LoadIdentityKey()
@@ -412,6 +416,32 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 	var liveHand *network.CryptoHand
 	var earlyShuffle []*network.ShuffleStep
 	var earlyPeels []*network.PartialDecrypt
+	var fm *fault.FaultManager
+	var liveHandNum atomic.Int64
+	liveHandNum.Store(1)
+
+	node.OnTimeoutVote = func(msg *network.TimeoutVote) {
+		if fm == nil || msg == nil {
+			return
+		}
+		_, _ = fm.HandleTimeoutVote(msg.TimeoutPlayerId, msg.VotingPlayerId, true)
+	}
+	node.OnKeyShare = func(msg *network.KeyShare, viaGossip bool) {
+		if fm == nil || msg == nil {
+			return
+		}
+		if msg.HandNum != network.TableShareHandNum && msg.HandNum != 1 {
+			return
+		}
+		share := network.KeyShareFromWire(msg)
+		if viaGossip {
+			fm.AddReconstructionShare(msg.OwnerId, share)
+			return
+		}
+		if msg.OwnerId != node.Host.PeerID {
+			fm.StoreKeyShare(msg.OwnerId, share)
+		}
+	}
 
 	node.OnShuffleStep = func(pb *network.ShuffleStep) {
 		cryptoMu.Lock()
@@ -564,48 +594,16 @@ waitLoop:
 	var gs *game.GameState
 	var machine *game.Machine
 
-	if noCrypto {
-		fmt.Println("DEBUG  ·  --no-crypto  ·  shared-seed plaintext  ·  all cards visible")
-		gs = game.NewGameState(cfg.Game.TableID, handNum, players, dealerIdx,
-			cfg.Game.SmallBlind, cfg.Game.BigBlind)
-		machine = game.NewMachine(gs, rand.New(rand.NewSource(sharedSeed)))
-	} else {
-		if !node.Lobby.AllSeatsHavePublicE() {
-			return fmt.Errorf("runP2PMode: crypto dealing requires every seat to publish e; a peer joined with --no-crypto")
-		}
-		var err error
-		kr, err = network.KeyringFromLobby(localPeerID, sraKey, node.Lobby)
-		if err != nil {
-			return fmt.Errorf("runP2PMode: %w", err)
-		}
-		fmt.Println("Cryptographic dealing  ·  SRA 2048-bit  ·  opponent holes stay hidden")
-		fmt.Println("Shuffling…")
-		machine, gs, liveHand, err = dealCryptoHand(ctx, node, kr, nonce, handNum, dealerIdx, players, localPeerID, cfg, installHand)
-		if err != nil {
-			return fmt.Errorf("runP2PMode: %w", err)
-		}
-		fmt.Println("Hole cards dealt. Starting table…")
-	}
-
-	machineMu.Lock()
-	liveMachine = machine
-	liveGS = gs
-	machineMu.Unlock()
-
-	// ── Fault manager ─────────────────────────────────────────────────────────
-	fm := fault.NewFaultManager(localPeerID, int64(handNum), fault.FaultConfig{
+	fm = fault.NewFaultManager(localPeerID, int64(handNum), fault.FaultConfig{
 		HeartbeatTimeout: cfg.Fault.HeartbeatTimeout,
 		VoteExpiry:       cfg.Fault.VoteExpiry,
 		Prime:            prime,
 	})
 	fm.RegisterPlayers(node.Lobby.CanonicalPlayerOrder())
-
-	// Update heartbeat handler to use fm
 	node.OnHeartbeat = func(msg *network.Heartbeat, sender string) {
 		fm.RecordHeartbeat(sender)
 	}
 
-	// ── Build and run TUI ─────────────────────────────────────────────────────
 	model := &p2pGameModel{
 		localPeerID: localPeerID,
 		players:     players,
@@ -627,10 +625,62 @@ waitLoop:
 		installHand: installHand,
 		seq:         seq,
 		notifyCh:    make(chan struct{}, 16),
+		liveHandNum: &liveHandNum,
+		gone:        make(map[string]struct{}),
+		recovering:  make(map[string]bool),
 	}
-	model.fm.OnPlayerFolded = model.forceFold
+	fm.OnPlayerFolded = model.forceFold
+	fm.OnTimeoutVoteNeeded = func(target string) {
+		_ = node.BroadcastTimeoutVote(ctx, liveHandNum.Load(), target)
+	}
+	fm.OnKeyShareNeeded = func(ownerID string, share pokercrypto.ShamirShare) {
+		fm.AddReconstructionShare(ownerID, share)
+		_ = node.BroadcastKeyShare(ctx, network.TableShareHandNum, ownerID, share)
+	}
 
-	// Augment the action callback to also poke the TUI notify channel.
+	go fm.Run(ctx)
+	go func() {
+		hs := fault.NewHeartbeatSender(localPeerID, cfg.Fault.HeartbeatInterval,
+			func(hbSeq int64) error {
+				return node.BroadcastHeartbeat(ctx, liveHandNum.Load(), hbSeq)
+			})
+		_ = hs.Run(ctx)
+	}()
+
+	if noCrypto {
+		fmt.Println("DEBUG  ·  --no-crypto  ·  shared-seed plaintext  ·  all cards visible")
+		gs = game.NewGameState(cfg.Game.TableID, handNum, players, dealerIdx,
+			cfg.Game.SmallBlind, cfg.Game.BigBlind)
+		machine = game.NewMachine(gs, rand.New(rand.NewSource(sharedSeed)))
+	} else {
+		if !node.Lobby.AllSeatsHavePublicE() {
+			return fmt.Errorf("runP2PMode: crypto dealing requires every seat to publish e; a peer joined with --no-crypto")
+		}
+		var err error
+		kr, err = network.KeyringFromLobby(localPeerID, sraKey, node.Lobby)
+		if err != nil {
+			return fmt.Errorf("runP2PMode: %w", err)
+		}
+		model.keyring = kr
+		if err := network.DistributeLocalShares(ctx, node, fm, kr, sraKey); err != nil {
+			fmt.Printf("[crypto] distribute shares: %v\n", err)
+		}
+		fmt.Println("Cryptographic dealing  ·  SRA 2048-bit  ·  opponent holes stay hidden")
+		fmt.Println("Shuffling…")
+		machine, gs, liveHand, err = dealCryptoHand(ctx, node, kr, nonce, handNum, dealerIdx, players, localPeerID, cfg, installHand)
+		if err != nil {
+			return fmt.Errorf("runP2PMode: %w", err)
+		}
+		fmt.Println("Hole cards dealt. Starting table…")
+	}
+
+	machineMu.Lock()
+	liveMachine = machine
+	liveGS = gs
+	machineMu.Unlock()
+	model.foldGoneIfCurrent()
+
+	// ── Build and run TUI ─────────────────────────────────────────────────────
 	prevOnAction := node.OnPlayerAction
 	node.OnPlayerAction = func(msg *network.PlayerAction) {
 		prevOnAction(msg)
@@ -650,15 +700,6 @@ waitLoop:
 
 	prog = tea.NewProgram(model, tea.WithAltScreen(), tea.WithContext(ctx))
 	model.prog = prog
-
-	// Heartbeat sender goroutine.
-	go func() {
-		hs := fault.NewHeartbeatSender(localPeerID, cfg.Fault.HeartbeatInterval,
-			func(hbSeq int64) error {
-				return node.BroadcastHeartbeat(ctx, int64(handNum), hbSeq)
-			})
-		_ = hs.Run(ctx)
-	}()
 
 	_, runErr := prog.Run()
 	return runErr
@@ -736,6 +777,11 @@ type p2pGameModel struct {
 
 	seq      *actionSequencer
 	notifyCh chan struct{}
+
+	liveHandNum *atomic.Int64
+	goneMu      sync.Mutex
+	gone        map[string]struct{}
+	recovering  map[string]bool
 }
 
 // applyAndBroadcast is the OnAction callback wired into the TUI.
@@ -867,6 +913,12 @@ func (m *p2pGameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // machine immediately, and starts the hand.
 func (m *p2pGameModel) startNextHand() tea.Msg {
 	m.handNum++
+	if m.liveHandNum != nil {
+		m.liveHandNum.Store(int64(m.handNum))
+	}
+	if m.fm != nil {
+		m.fm.SetHandNum(int64(m.handNum))
+	}
 	m.dealerIdx = (m.dealerIdx + 1) % len(m.players)
 	for _, p := range m.players {
 		p.ResetForNewHand()
@@ -909,31 +961,207 @@ func (m *p2pGameModel) startNextHand() tea.Msg {
 func (m *p2pGameModel) View() string { return m.ui.View() }
 
 func (m *p2pGameModel) forceFold(peerID string) {
+	m.noteGone(peerID)
+
+	m.cryptoMu.Lock()
+	var h *network.CryptoHand
+	if m.liveHand != nil {
+		h = *m.liveHand
+	}
+	m.cryptoMu.Unlock()
+	if h != nil && !h.ShuffleDone() {
+		err := fmt.Errorf("shuffle aborted: peer %s timed out", peerID)
+		h.AbortShuffle(err)
+		if m.prog != nil {
+			m.prog.Send(tui.ErrorMsg{Text: err.Error()})
+		}
+		return
+	}
+
 	m.machineMu.Lock()
 	machine := *m.machinePtr
 	if machine == nil {
 		m.machineMu.Unlock()
+		if !m.noCrypto {
+			go m.beginRecovery(peerID)
+		}
 		return
 	}
+	already := false
 	for _, p := range machine.State.Players {
-		if p.ID == peerID {
-			a := game.Action{PlayerID: peerID, Type: game.ActionFold}
-			_ = machine.ApplyAction(a)
-			if m.prog != nil {
-				m.prog.Send(tui.GameStateMsg{State: machine.State})
-			}
+		if p.ID == peerID && (p.Status == game.StatusFolded || p.Status == game.StatusSittingOut) {
+			already = true
 			break
 		}
 	}
+	applied := false
+	var a game.Action
+	var outSeq int64
+	if !already {
+		a = game.Action{PlayerID: peerID, Type: game.ActionFold}
+		if err := machine.ApplyAction(a); err == nil {
+			m.seq.mu.Lock()
+			outSeq = m.seq.nextSeq
+			m.seq.nextSeq++
+			m.seq.mu.Unlock()
+			applied = true
+			if m.prog != nil {
+				m.prog.Send(tui.GameStateMsg{State: machine.State})
+			}
+		}
+	}
 	m.machineMu.Unlock()
+
+	if applied {
+		if err := m.node.BroadcastAction(m.ctx, int64(m.handNum), a, outSeq); err != nil {
+			fmt.Printf("[error] broadcast timeout fold: %v\n", err)
+		}
+	}
 	m.kickCryptoAdvance()
+	if !m.noCrypto {
+		go m.beginRecovery(peerID)
+	}
+}
+
+func (m *p2pGameModel) noteGone(peerID string) {
+	m.goneMu.Lock()
+	defer m.goneMu.Unlock()
+	if m.gone == nil {
+		m.gone = make(map[string]struct{})
+	}
+	m.gone[peerID] = struct{}{}
+}
+
+func (m *p2pGameModel) isGone(peerID string) bool {
+	m.goneMu.Lock()
+	defer m.goneMu.Unlock()
+	_, ok := m.gone[peerID]
+	return ok
+}
+
+func (m *p2pGameModel) foldGoneIfCurrent() {
+	m.machineMu.Lock()
+	machine := *m.machinePtr
+	if machine == nil || machine.State == nil {
+		m.machineMu.Unlock()
+		return
+	}
+	cur := machine.State.CurrentPlayer()
+	if cur == nil || !m.isGone(cur.ID) {
+		m.machineMu.Unlock()
+		return
+	}
+	if cur.Status == game.StatusFolded || cur.Status == game.StatusSittingOut {
+		m.machineMu.Unlock()
+		return
+	}
+	a := game.Action{PlayerID: cur.ID, Type: game.ActionFold}
+	if err := machine.ApplyAction(a); err != nil {
+		m.machineMu.Unlock()
+		return
+	}
+	m.seq.mu.Lock()
+	outSeq := m.seq.nextSeq
+	m.seq.nextSeq++
+	m.seq.mu.Unlock()
+	gs := machine.State
+	m.machineMu.Unlock()
+	if err := m.node.BroadcastAction(m.ctx, int64(m.handNum), a, outSeq); err != nil {
+		fmt.Printf("[error] broadcast gone fold: %v\n", err)
+	}
+	if m.prog != nil {
+		m.prog.Send(tui.GameStateMsg{State: gs})
+	}
+}
+
+func (m *p2pGameModel) beginRecovery(missingID string) {
+	m.cryptoMu.Lock()
+	if m.recovering == nil {
+		m.recovering = make(map[string]bool)
+	}
+	already := m.recovering[missingID]
+	m.recovering[missingID] = true
+	var h *network.CryptoHand
+	if m.liveHand != nil {
+		h = *m.liveHand
+	}
+	m.cryptoMu.Unlock()
+
+	if h != nil && !h.ShuffleDone() {
+		err := fmt.Errorf("shuffle aborted: peer %s timed out", missingID)
+		h.AbortShuffle(err)
+		if m.prog != nil {
+			m.prog.Send(tui.ErrorMsg{Text: err.Error()})
+		}
+		return
+	}
+
+	if already {
+		m.sendDelegatedPeels(h)
+		return
+	}
+
+	if m.fm != nil {
+		m.fm.BroadcastMyShareFor(missingID)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	var key *pokercrypto.SRAKey
+	for time.Now().Before(deadline) {
+		if m.fm != nil {
+			if k, ok := m.fm.TryReconstructKey(missingID); ok {
+				key = k
+				break
+			}
+		}
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if key == nil {
+		fmt.Printf("[crypto] reconstruct %s: timed out\n", missingID)
+		return
+	}
+
+	m.cryptoMu.Lock()
+	if m.liveHand != nil {
+		h = *m.liveHand
+	}
+	m.cryptoMu.Unlock()
+	if h == nil {
+		return
+	}
+	if err := h.MarkGone(missingID, key); err != nil {
+		fmt.Printf("[crypto] MarkGone: %v\n", err)
+		return
+	}
+	m.sendDelegatedPeels(h)
+}
+
+func (m *p2pGameModel) sendDelegatedPeels(h *network.CryptoHand) {
+	if h == nil || m.node == nil {
+		return
+	}
+	msgs, err := h.TryDelegatedPeels()
+	if err != nil {
+		fmt.Printf("[crypto] TryDelegatedPeels: %v\n", err)
+		return
+	}
+	for _, msg := range msgs {
+		if err := m.node.SendPeel(m.ctx, msg); err != nil {
+			fmt.Printf("[error] send delegated peel: %v\n", err)
+		}
+	}
 }
 
 func (m *p2pGameModel) kickCryptoAdvance() {
-	if m.noCrypto || m.liveHand == nil {
-		return
-	}
 	go func() {
+		m.foldGoneIfCurrent()
+		if m.noCrypto || m.liveHand == nil {
+			return
+		}
 		m.cryptoMu.Lock()
 		h := *m.liveHand
 		m.cryptoMu.Unlock()
@@ -941,15 +1169,15 @@ func (m *p2pGameModel) kickCryptoAdvance() {
 			return
 		}
 		m.machineMu.Lock()
-		defer m.machineMu.Unlock()
 		machine := *m.machinePtr
 		gs := *m.gsPtr
+		m.machineMu.Unlock()
 		if machine == nil {
 			return
 		}
 		ctx, cancel := context.WithTimeout(m.ctx, 2*time.Minute)
 		defer cancel()
-		err := network.AdvanceCrypto(ctx, h, machine, func(msgs []*pokercrypto.PeelMessage) error {
+		err := network.AdvanceCryptoLocked(ctx, h, machine, m.machineMu, func(msgs []*pokercrypto.PeelMessage) error {
 			for _, msg := range msgs {
 				if err := m.node.SendPeel(m.ctx, msg); err != nil {
 					return err
@@ -961,6 +1189,7 @@ func (m *p2pGameModel) kickCryptoAdvance() {
 			m.prog.Send(tui.ErrorMsg{Text: err.Error()})
 			return
 		}
+		m.foldGoneIfCurrent()
 		if m.prog != nil {
 			m.prog.Send(tui.GameStateMsg{State: gs})
 		}
@@ -1113,7 +1342,7 @@ FLAGS:
   --no-crypto              Debug: shared-seed plaintext dealing (all cards visible; sync testing only)
 
 HOST FLAGS:
-  --seats N                Number of seats (2-9, default: from config)
+  --seats N                Number of seats (3-9, default: from config)
   --name  NAME             Your display name
   --table ID               Table identifier string
   --listen ADDR            libp2p listen address (default /ip4/0.0.0.0/tcp/9000)
@@ -1126,16 +1355,19 @@ JOIN FLAGS:
 
 EXAMPLES:
 
-  # Two players on the same LAN (MDNS finds each other automatically):
+  # Three players on the same LAN (MDNS finds each other automatically):
   #   Machine A:
-  poker host --seats 2 --name Alice --table friday
+  poker host --seats 3 --name Alice --table friday
 
   #   Machine B:
   poker join --name Bob --table friday
 
-  # Two players on different networks (copy the multiaddr from host output):
+  #   Machine C:
+  poker join --name Carol --table friday
+
+  # Three players on different networks (copy the multiaddr from host output):
   #   Machine A:
-  poker host --seats 2 --name Alice --table friday
+  poker host --seats 3 --name Alice --table friday
 
   #   Machine B:
   poker join --name Bob --table friday \
@@ -1151,6 +1383,15 @@ KEYBOARD CONTROLS:
   ↑/↓ k/j   Scroll log
   q          Quit
 `)
+}
+
+const minP2PSeats = 3
+
+func requireP2PSeats(n int) error {
+	if n < minP2PSeats {
+		return fmt.Errorf("runP2PMode: need at least 3 seats for timeout recovery (got %d)", n)
+	}
+	return nil
 }
 
 func formatChips(chips int64) string {

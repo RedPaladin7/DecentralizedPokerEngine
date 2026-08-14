@@ -27,7 +27,7 @@ Do **not** start with libp2p. Start with the problem, then lock scope, then NFRs
 
 Then pin the product:
 
-> “Texas Hold’em, 2–9 seats, one table, multi-hand. Not a 10k-player tournament, not a global matchmaking service.”
+> “Texas Hold’em, local 2–9 / P2P 3–9 seats, one table, multi-hand. Not a 10k-player tournament, not a global matchmaking service.”
 
 That last sentence is important. Poker’s natural shard size is a table. You are not designing GossipSub for a million nodes.
 
@@ -38,18 +38,18 @@ Write them on the left of the board:
 1. **Join / seat / start** — table fills to N, then a hand starts. Canonical seat order.
 2. **Full Hold’em loop** — blinds, hole cards, pre-flop → flop → turn → river → showdown, check/call/raise/fold/all-in, main + side pots, next hand.
 3. **Identical outcomes** — every honest peer computes the same stacks, pots, and winner. No node is “the server.”
-4. **Hidden hole cards** (design target) — only the recipient learns their two cards; community cards become public at the right street.
+4. **Hidden hole cards** — only the recipient learns their two cards; community cards become public at the right street.
 5. **Unbiased shuffle** — no single player chooses the deck order.
 6. **Authenticated actions** — you cannot impersonate another seat.
-7. **Liveness** — a silent player can be force-folded so the table does not stall.
+7. **Liveness** — a silent player is force-folded; after shuffle, survivors reconstruct `d` and finish peels. Mid-shuffle abort.
 8. **Accountability** — if someone double-speaks or fakes a decrypt, we have signed evidence.
 9. **Optional settlement** — buy-in escrow, multi-sig payout, dispute/slash window.
 
 If they ask “what did you actually ship?” be precise:
 
-> “Live path today: replicated game engine over gossip, identical outcomes, heartbeats. Cryptographic dealing and Ethereum escrow are implemented beside that path; the production loop still uses a shared-seed shuffle. I’ll design the trustless version and call out the v1 shortcut.”
+> “Live path today: replicated Hold’em over gossip, SRA shuffle + ZK peels so hole cards stay hidden, timeout fold plus Shamir reconstruct if someone dies after the shuffle. `--no-crypto` is a debug shared-seed mode. Ethereum escrow is a real Solidity contract; the Go RPC client is still stubbed — chips in the demo are local counters.”
 
-That honesty reads as senior. Claiming SRA is live when it isn’t will get you caught.
+Do not claim live ETH payouts or 2-player P2P. Claiming the chain is wired when it isn’t will get you caught.
 
 ### Non-functional requirements — put numbers on them
 
@@ -60,10 +60,10 @@ Interviewers punish vague NFRs. Use these:
 | **Fairness** | No player learns another’s hole cards; shuffle unbiased unless *all* collude | Core product |
 | **Consistency** | Strong: all honest nodes apply the same total order of actions | Poker cannot fork mid-hand |
 | **Latency** | 100–500 ms mesh latency is OK; action RTT < ~1s | Human-speed game, not HFT |
-| **Availability** | Table survives 1 crash via timeout fold; not “five nines” | 9-player table, not S3 |
+| **Availability** | Table survives 1 crash **after shuffle** via timeout fold + Shamir peels; mid-shuffle abort. Not “five nines” | 9-player table, not S3 |
 | **Fault model** | Crash-stop + equivocation + invalid decrypt. Not full BFT on every action | Critical distinction |
 | **Security** | Authenticated gossip, replay-safe, evidence for slash | Trustless table |
-| **Scale** | 2–9 players per table; many tables are independent | Don’t over-design the mesh |
+| **Scale** | Local 2–9; P2P 3–9 per table; many tables are independent | Don’t over-design the mesh |
 | **Durability of money** | On-chain escrow is source of truth for ETH; chips off-chain | Separate game from cash |
 
 ### Clarify with the interviewer (ask 3 questions, then stop)
@@ -74,7 +74,7 @@ Interviewers punish vague NFRs. Use these:
 
 Then lock:
 
-> “I’m designing **one table, N≤9, replicated state machine, mental-poker dealing, gossip for broadcast, chain only for money.** Out of scope: matchmaking, tournaments, mobile, reconnection/catch-up — I’ll mention those as follow-ups.”
+> “I’m designing **one table, P2P N=3..9, replicated state machine, mental-poker dealing, gossip for broadcast, chain only for money.** Out of scope: matchmaking, tournaments, mobile, reconnection/catch-up — I’ll mention those as follow-ups.”
 
 ---
 
@@ -113,7 +113,7 @@ Say while you draw:
 
 **Two topics.** Game messages on `poker/table/<id>`. Heartbeats on a separate topic so a slow action mesh does not look like a dead player.
 
-**Two transports.** Gossip for “everyone must see this” (joins, actions, shuffle steps). Direct streams for “only this peer should get this ciphertext peel.” Gossip is forwarded, so **Noise is not enough** — you sign the payload. Direct streams are Noise-bound to a Peer ID, so hop auth is enough.
+**Two transports.** Gossip for “everyone must see this” (joins, actions, shuffle steps, public peels). Direct streams for hole peels (best-effort) and **unicast Shamir shares of `d`**. Gossip is forwarded, so **Noise is not enough** — you sign the payload. Direct streams are Noise-bound to a Peer ID, so hop auth is enough. Live shares are not gossiped until a timeout vote.
 
 ### Walk the happy path in 90 seconds (do this on the board as numbered arrows)
 
@@ -122,8 +122,8 @@ Say while you draw:
 3. **Lobby** — `JOIN_TABLE` (name, buy-in, SRA public exponent, nonce). Seats ordered by join time, then Peer ID. That order is the canonical permutation of the table.
 4. **Barrier** — `PLAYER_READY`. When N seats are ready, the hand exists.
 5. **Shared session binding** — concatenate nonces in seat order → session id / seed. Every honest node that saw the same joins gets the same bytes.
-6. **Deal** — either (v1) shared-seed shuffle, or (v2) SRA shuffle then selective decrypt.
-7. **Play** — current player signs an action; everyone applies it in sequence number order; each replica deals streets and evaluates showdown locally.
+6. **Deal** — default: SRA shuffle then selective decrypt (local holes only). `--no-crypto`: shared-seed shuffle, all cards visible.
+7. **Play** — current player signs an action; everyone applies it in sequence number order. Crypto: streets and showdown cards come from peels (`ApplyStreet` / `ApplyHoleReveal`), not from a local deck.
 8. **Settle** — optional: payout deltas + log root, ≥2/3 signatures → escrow contract.
 
 ### Four components per node (the “box inside a peer”)
@@ -177,7 +177,7 @@ Three things must match:
 
 1. **Seat vector** — join messages, ordered by timestamp then Peer ID.
 2. **Config** — blinds, buy-in, table id, dealer index.
-3. **Deck permutation** — v1: `seed = mix(sessionNonce)`; every node Fisher–Yates with that seed. v2: jointly shuffled ciphertext (next section).
+3. **Deck permutation** — default: jointly shuffled ciphertext (ShuffleSession; replicas agree without sharing `d`). `--no-crypto`: `seed = mix(sessionNonce)`; every node Fisher–Yates with that seed.
 
 Call out the footgun: join timestamps are sender-stamped. Clock skew can reorder seats. Senior move: “I’d replace wall-clock order with a hash of Peer IDs plus a VRF/commit-reveal for dealer, or a single observed receive-order only if we had a leader — which we don’t. For LAN v1, synchronized clocks are the assumption.”
 
@@ -201,13 +201,14 @@ Self-echo: GossipSub will bounce your own message back. Drop if `sender == me`. 
 
 #### Deterministic reducer
 
-`ApplyAction` is the only mutation. It validates “is it your turn?”, updates stacks, maybe ends the betting round, deals the next street from the **local deck replica**, or runs showdown. No I/O.
+`ApplyAction` is the only betting mutation. It validates “is it your turn?”, updates stacks, maybe ends the betting round. In crypto mode the next street is **not** dealt from a local deck — the replica waits (`PhaseAwaitingStreet`), peels publicly, then `ApplyStreet`. Showdown fills opponent holes via `ApplyHoleReveal`. No I/O in the engine.
 
 Consequences you should say:
 
 - Winners are not announced; they are computed. A lying `HAND_RESULT` is ignored if it disagrees with local state.
-- Next hand mixes `handNum` into the seed so decks differ but stay identical across nodes.
+- Next hand starts a **new** shuffle (session id mixes `handNum`). `--no-crypto` mixes `handNum` into the seed instead.
 - When the machine object is replaced for a new hand, the network thread must not apply to the stale one — pointer swap under a lock.
+- `machineMu` is held around every apply; crypto wait loops release it so a timeout fold can run.
 
 #### What this is *not*
 
@@ -276,9 +277,9 @@ This is a distinction that separates you:
 
 #### Liveness vs. safety of cards
 
-Timeout: heartbeats, 15s, then a **2/3 vote of the other n−1** to force-fold. That is liveness of the *betting* machine.
+Timeout: heartbeats, 15s, then a **2/3 vote of the other n−1** to force-fold **and broadcast that fold**. That is liveness of the *betting* machine.
 
-Key withholding: if the missing player holds a decrypt layer the table needs (showdown / community), fold is not enough. **Shamir-share `d` at threshold ~n/2** so survivors reconstruct and finish the peel. Different failure mode, different tool. Say that explicitly.
+Key withholding: if the missing player holds a decrypt layer the table needs (showdown / community), fold is not enough. **Shamir-share `d` at table start** (unicast; threshold ~n/2, min 2 — hence P2P `n ≥ 3`). Survivors reconstruct and a designated peer peels **on behalf** of the missing id. Mid-shuffle the permutation is gone: abort the hand. Different failure mode, different tool. Say that explicitly.
 
 #### Money is not the game
 
@@ -286,11 +287,11 @@ Key withholding: if the missing player holds a decrypt layer the table needs (sh
 
 That’s how you keep the chain off the hot path. Poker at 2s/action cannot wait for block time.
 
-#### v1 honesty, again, in one line
+#### Honesty about what is not live
 
-> “Shipped consistency: shared-seed shuffle — great for lockstep, **zero card privacy**. The SRA path is the real fairness design; wiring it means replacing `StartHand`’s local shuffle with shuffle-step gossip and `StartHandCrypto`.”
+> “SRA dealing and Shamir peels are on the default `host`/`join` path. `--no-crypto` is shared-seed — great for lockstep, **zero card privacy**. Ethereum escrow is designed and tested in Solidity; the Go client does not talk to a node, so demo chips are honor-system counters.”
 
-If they only want shipped reality, stay on the sequencer + replica. If they want the interesting system, go SRA. Read the room.
+If they only want shipped reality, stay on sequencer + replica + SRA. If they want the remaining gap, go chain RPC and reconnect. Read the room.
 
 ---
 
@@ -313,11 +314,9 @@ Don’t list random cons. Pair each with **why you accepted it** and **what you�
 
 SRA shuffle is **n sequential** encrypt-and-permute rounds, 52 modular exponentiations per player per round, 2048-bit. Deal is O(n) peels per card with ZK proofs.
 
-That’s seconds, not milliseconds, before pre-flop. Fine for home game; death for “instant play.”
+That’s seconds, not milliseconds, before pre-flop. Fine for a LAN demo / home game; death for “instant play.” Do not pretend you optimized SRA.
 
-v1 shared seed is **fast and identical and totally transparent**. You traded privacy for simplicity.
-
-**Hybrid you’d propose if they ask “how do we ship?”:** play with SRA; if a player opts into casual mode, shared seed. Never mix modes at one table.
+`--no-crypto` shared seed is **fast and identical and totally transparent**. Never mix modes at one table (the live loop errors if any seat is missing `e`).
 
 ### 3. Mesh scalability
 
@@ -356,21 +355,21 @@ Every action off-chain = you reintroduced a house if someone holds the chips.
 
 ### 7. Single-threaded reducer vs. concurrent applies
 
-The machine is not internally locked. Safety relies on “one actor at a time” plus the sequencer. A delayed duplicate that passes the sequencer is a bug class.
+The machine is not internally locked. The live loop holds one mutex around every `ApplyAction`. Street peels wait **without** that lock so timeout recovery can fold.
 
-**Call:** keep it single-threaded; never apply from two goroutines. If you need it, a single apply goroutine owning the machine, everyone else sends on a channel. That’s the Go-shaped version of “the log consumer is one thread.”
+**Call:** keep the reducer single-threaded; never apply from two goroutines. If you need it, a single apply goroutine owning the machine, everyone else sends on a channel. That’s the Go-shaped version of “the log consumer is one thread.”
 
 ### Bottlenecks to name if they ask “what breaks first?”
 
 1. **SRA CPU / sequential shuffle** — hand start time, grows with n.
 2. **NAT / connectivity** — table never forms on WAN.
 3. **Sequencer stall** — lost action 7, everyone waits forever (need NAK/retransmit or state sync).
-4. **Clock-ordered lobby** — seat permutation disagreement → different seeds → instant desync.
+4. **Clock-ordered lobby** — seat permutation disagreement → different shuffle turns / seeds → instant desync.
 5. **Chain stub / challenge game** — money path not live; without it, chips are honor system.
 
 ### Close (last 60 seconds)
 
-> “I would draw this as three layers that don’t leak into each other: a **pure deterministic engine**, an **authenticated totally-ordered log** over a mesh, and a **mental-poker + escrow** layer for privacy and money. v1 proves the middle: lockstep play without a server. The remaining work is swapping the dealing function and plugging the log root into the contract — not rewriting the architecture.”
+> “I would draw this as three layers that don’t leak into each other: a **pure deterministic engine**, an **authenticated totally-ordered log** over a mesh, and a **mental-poker + escrow** layer for privacy and money. The shipped demo is lockstep play without a server **and** hidden cards on the LAN. Remaining work is plugging the log root into the contract, reconnect/catch-up, and WAN discovery — not rewriting the architecture.”
 
 Stop talking. Let them probe.
 
@@ -382,7 +381,7 @@ Stop talking. Let them probe.
 
 - Say “replicated state machine,” “total order,” “commutative encryption,” “detect vs prevent,” “chain off the hot path.”
 - Separate **envelope seq** from **action seq** without being asked.
-- Volunteer the v1/v2 dealing gap before they find it.
+- Volunteer the remaining gaps before they find them: chain RPC stub, no reconnect, mid-shuffle abort, P2P min 3 seats, LAN-only.
 - Scope to one table immediately.
 
 **Don’t**
@@ -408,4 +407,4 @@ Matchmaking and wallets are a different system. Your table is a **stateful shard
 | What if gossip drops a message? | Sequencer blocks; I need retransmission or snapshot sync — current gap. |
 | Is this CAP? | During partition you don’t have a majority commit; you choose not to make progress rather than fork the pot. CP-shaped, without a quorum. |
 
-Learn the invariant, the two sequence numbers, SRA deal vs shared seed, and the gossip-vs-BFT trade. Everything else is supporting detail. You can walk this in 45 minutes without opening a file.
+Learn the invariant, the two sequence numbers, SRA deal vs `--no-crypto`, timeout-plus-Shamir vs mid-shuffle abort, and the gossip-vs-BFT trade. Everything else is supporting detail. You can walk this in 45 minutes without opening a file.

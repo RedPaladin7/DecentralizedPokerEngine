@@ -998,3 +998,88 @@ func TestDealSession_Showdown_EvaluateBest7Agrees(t *testing.T) {
 	_ = best0
 	_ = best1
 }
+
+func TestDealSession_PeelOnBehalf_ProducesMissingPlayerID(t *testing.T) {
+	ids := []string{"alice", "bob", "carol"}
+	rings, sessions, _, _ := setupTinyDeals(t, ids, 14, 0)
+	driveSequential(t, sessions, (*DealSession).BeginHoles, (*DealSession).HolesDone)
+
+	alice, bob, _ := sessions[0], sessions[1], sessions[2]
+	outs := make([][]*PeelMessage, 3)
+	for i, s := range sessions {
+		outs[i] = mustBeginStreet(t, s, StreetFlop)
+	}
+	// Deliver until carol is the expected peeler of the first flop card.
+	inbox := [3][]*PeelMessage{}
+	deliver := func(from int, msgs []*PeelMessage) {
+		for _, msg := range msgs {
+			for i := range sessions {
+				if i != from {
+					inbox[i] = append(inbox[i], copyPeelMessage(msg))
+				}
+			}
+		}
+	}
+	deliver(0, outs[0])
+	deliver(1, outs[1])
+	deliver(2, outs[2])
+
+	for step := 0; step < 50 && alice.ExpectedPeeler() != "carol"; step++ {
+		progress := false
+		for i, s := range sessions {
+			if len(inbox[i]) == 0 {
+				continue
+			}
+			msg := inbox[i][0]
+			inbox[i] = inbox[i][1:]
+			produced := mustHandlePeel(t, s, msg)
+			deliver(i, produced)
+			progress = true
+		}
+		if !progress {
+			t.Fatal("stuck before carol's peel")
+		}
+	}
+	if alice.ExpectedPeeler() != "carol" {
+		t.Fatalf("expected carol to be next peeler, got %q", alice.ExpectedPeeler())
+	}
+
+	cardBefore := alice.testCardIndex()
+	delegated, err := alice.PeelOnBehalf("carol", rings[2].LocalKey())
+	if err != nil {
+		t.Fatalf("PeelOnBehalf: %v", err)
+	}
+	if delegated == nil || delegated.PlayerID != "carol" {
+		t.Fatalf("PlayerID=%v want carol", delegated)
+	}
+	produced := collectPeels(alice, delegated)
+	_ = produced
+
+	if _, err := bob.HandlePeel(copyPeelMessage(delegated)); err != nil {
+		t.Fatalf("bob HandlePeel delegated: %v", err)
+	}
+	if alice.testCardIndex() == cardBefore && alice.ExpectedPeeler() == "carol" {
+		t.Fatal("job did not advance after delegated peel")
+	}
+}
+
+func TestDealSession_PeelOnBehalf_RejectsLocalID(t *testing.T) {
+	ids := []string{"alice", "bob"}
+	rings, sessions, _, _ := setupTinyDeals(t, ids, 8, 0)
+	if _, err := sessions[0].PeelOnBehalf("alice", rings[0].LocalKey()); err == nil {
+		t.Fatal("expected PeelOnBehalf(localID) to error")
+	}
+}
+
+func TestDealSession_PeelOnBehalf_WrongExpected(t *testing.T) {
+	ids := []string{"alice", "bob", "carol"}
+	rings, sessions, _, _ := setupTinyDeals(t, ids, 14, 0)
+	driveSequential(t, sessions, (*DealSession).BeginHoles, (*DealSession).HolesDone)
+	mustBeginStreet(t, sessions[1], StreetFlop)
+	if sessions[1].ExpectedPeeler() != "alice" {
+		t.Fatalf("expected alice first on bob's replica, got %q", sessions[1].ExpectedPeeler())
+	}
+	if _, err := sessions[1].PeelOnBehalf("bob", rings[1].LocalKey()); err == nil {
+		t.Fatal("expected PeelOnBehalf(bob) to error while alice is next")
+	}
+}

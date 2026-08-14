@@ -37,6 +37,7 @@ const (
 	MsgType_HAND_RESULT           MsgType = 10
 	MsgType_LEAVE_TABLE           MsgType = 11
 	MsgType_EQUIVOCATION_EVIDENCE MsgType = 12
+	MsgType_KEY_SHARE             MsgType = 13
 )
 
 // Enum value maps for MsgType.
@@ -55,6 +56,7 @@ var (
 		10: "HAND_RESULT",
 		11: "LEAVE_TABLE",
 		12: "EQUIVOCATION_EVIDENCE",
+		13: "KEY_SHARE",
 	}
 	MsgType_value = map[string]int32{
 		"UNKNOWN":               0,
@@ -70,6 +72,7 @@ var (
 		"HAND_RESULT":           10,
 		"LEAVE_TABLE":           11,
 		"EQUIVOCATION_EVIDENCE": 12,
+		"KEY_SHARE":             13,
 	}
 )
 

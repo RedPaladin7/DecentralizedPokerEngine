@@ -16,6 +16,7 @@ enum MsgType {
     HAND_RESULT = 10;
     LEAVE_TABLE = 11;
     EQUIVOCATION_EVIDENCE = 12;
+    KEY_SHARE = 13;
 }
 
 message Envelope {
@@ -124,4 +125,12 @@ message EquivocationEvidence{
     string sender_id = 3;
     Envelope env_a = 4;
     Envelope env_b = 5;
+}
+
+message KeyShare {
+    string table_id = 1;
+    int64  hand_num = 2;
+    string owner_id = 3;   // whose d this share is of
+    int32  index = 4;      // Shamir x (1..n)
+    bytes  value = 5;      // big.Int.Bytes() of the share
 }

@@ -16,19 +16,20 @@ const earlyBufCap = 64
 // CryptoHand runs one replica's shuffle + peels for a single hand.
 // It produces cards; callers feed them into game.Machine.
 type CryptoHand struct {
-	mu         sync.Mutex
-	kr         *pokercrypto.Keyring
-	handNum    int64
-	dealerIdx  int
-	sessionID  []byte
-	shuffle    *pokercrypto.ShuffleSession
-	deal       *pokercrypto.DealSession
-	shuffleGate *waitGate
-	holesGate   *waitGate
-	streetGate  *waitGate
-	revealGate  *waitGate
+	mu           sync.Mutex
+	kr           *pokercrypto.Keyring
+	handNum      int64
+	dealerIdx    int
+	sessionID    []byte
+	shuffle      *pokercrypto.ShuffleSession
+	deal         *pokercrypto.DealSession
+	shuffleGate  *waitGate
+	holesGate    *waitGate
+	streetGate   *waitGate
+	revealGate   *waitGate
 	earlyShuffle []*pokercrypto.ShuffleMessage
 	earlyPeels   []*pokercrypto.PeelMessage
+	gone         map[string]*pokercrypto.SRAKey
 }
 
 func NewCryptoHand(kr *pokercrypto.Keyring, lobbyNonce []byte, handNum int64, dealerIdx int) (*CryptoHand, error) {
@@ -151,6 +152,11 @@ func (h *CryptoHand) StartHoles() ([]*pokercrypto.PeelMessage, error) {
 		return nil, err
 	}
 	out = append(out, extra...)
+	delegated, err := h.tryDelegatedPeelsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, delegated...)
 	h.signalPeelProgressLocked()
 	return out, nil
 }
@@ -179,6 +185,11 @@ func (h *CryptoHand) HandlePeel(msg *pokercrypto.PeelMessage) ([]*pokercrypto.Pe
 		return nil, err
 	}
 	out = append(out, extra...)
+	delegated, err := h.tryDelegatedPeelsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, delegated...)
 	h.signalPeelProgressLocked()
 	return out, nil
 }
@@ -237,6 +248,11 @@ func (h *CryptoHand) StartStreet(street pokercrypto.Street) ([]*pokercrypto.Peel
 		return nil, err
 	}
 	out = append(out, extra...)
+	delegated, err := h.tryDelegatedPeelsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, delegated...)
 	h.signalPeelProgressLocked()
 	return out, nil
 }
@@ -297,6 +313,11 @@ func (h *CryptoHand) StartReveal(playerID string) ([]*pokercrypto.PeelMessage, e
 		return nil, err
 	}
 	out = append(out, extra...)
+	delegated, err := h.tryDelegatedPeelsLocked()
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, delegated...)
 	h.signalPeelProgressLocked()
 	return out, nil
 }
@@ -327,6 +348,77 @@ func (h *CryptoHand) RevealedHoles(playerID string) ([2]game.Card, error) {
 		return z, errors.New("CryptoHand.RevealedHoles: deal has not started")
 	}
 	return deal.RevealedHoles(playerID)
+}
+
+// MarkGone records a reconstructed key for a timed-out peer. The key is never
+// stored on the Keyring. Idempotent for the same id.
+func (h *CryptoHand) MarkGone(id string, key *pokercrypto.SRAKey) error {
+	if h == nil {
+		return errors.New("CryptoHand.MarkGone: hand is nil")
+	}
+	if id == "" {
+		return errors.New("CryptoHand.MarkGone: empty player id")
+	}
+	if key == nil || !key.IsPrivate() {
+		return errors.New("CryptoHand.MarkGone: reconstructed key is missing d")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.gone == nil {
+		h.gone = make(map[string]*pokercrypto.SRAKey)
+	}
+	h.gone[id] = key
+	return nil
+}
+
+// TryDelegatedPeels produces peels for gone players when this replica is the
+// designated survivor (first remaining SeatOrder id).
+func (h *CryptoHand) TryDelegatedPeels() ([]*pokercrypto.PeelMessage, error) {
+	if h == nil {
+		return nil, errors.New("CryptoHand.TryDelegatedPeels: hand is nil")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tryDelegatedPeelsLocked()
+}
+
+func (h *CryptoHand) tryDelegatedPeelsLocked() ([]*pokercrypto.PeelMessage, error) {
+	if h.deal == nil || len(h.gone) == 0 {
+		return nil, nil
+	}
+	if DesignatedSurvivor(h.kr.SeatOrder(), h.gone) != h.kr.LocalID() {
+		return nil, nil
+	}
+	var produced []*pokercrypto.PeelMessage
+	for {
+		peeler := h.deal.ExpectedPeeler()
+		if peeler == "" {
+			break
+		}
+		key, ok := h.gone[peeler]
+		if !ok {
+			break
+		}
+		msg, err := h.deal.PeelOnBehalf(peeler, key)
+		if err != nil {
+			return produced, err
+		}
+		produced = append(produced, collectPeels(h.deal, msg)...)
+		h.signalPeelProgressLocked()
+	}
+	return produced, nil
+}
+
+// AbortShuffle fails WaitShuffle. Used when a peer times out mid-shuffle.
+// Do not MarkGone — the secret permutation cannot be recovered.
+func (h *CryptoHand) AbortShuffle(reason error) {
+	if h == nil {
+		return
+	}
+	if reason == nil {
+		reason = errors.New("CryptoHand: shuffle aborted")
+	}
+	h.shuffleGate.fail(reason)
 }
 
 // RemainingShowdownIDs is remaining Active/All-In seats in table order.
@@ -369,12 +461,34 @@ func StreetFromPending(m *game.Machine) (pokercrypto.Street, error) {
 // AdvanceCrypto peels pending streets and showdown reveals into the machine.
 // send is called with every locally produced peel (including Outbound).
 func AdvanceCrypto(ctx context.Context, h *CryptoHand, m *game.Machine, send func([]*pokercrypto.PeelMessage) error) error {
+	return AdvanceCryptoLocked(ctx, h, m, nil, send)
+}
+
+// AdvanceCryptoLocked is AdvanceCrypto that releases mu during WaitStreet /
+// WaitReveal so a timeout fold can take the same mutex. Caller must not hold mu.
+func AdvanceCryptoLocked(ctx context.Context, h *CryptoHand, m *game.Machine, mu *sync.Mutex, send func([]*pokercrypto.PeelMessage) error) error {
 	if h == nil || m == nil {
 		return errors.New("AdvanceCrypto: nil hand or machine")
 	}
 	if send == nil {
 		send = func([]*pokercrypto.PeelMessage) error { return nil }
 	}
+	held := false
+	acquire := func() {
+		if mu != nil && !held {
+			mu.Lock()
+			held = true
+		}
+	}
+	release := func() {
+		if mu != nil && held {
+			mu.Unlock()
+			held = false
+		}
+	}
+	acquire()
+	defer release()
+
 	for m.NeedsStreet() {
 		street, err := StreetFromPending(m)
 		if err != nil {
@@ -388,7 +502,10 @@ func AdvanceCrypto(ctx context.Context, h *CryptoHand, m *game.Machine, send fun
 		if err := send(msgs); err != nil {
 			return err
 		}
-		if err := h.WaitStreet(ctx); err != nil {
+		release()
+		err = h.WaitStreet(ctx)
+		acquire()
+		if err != nil {
 			return err
 		}
 		cards, err := h.NewCommunityCards(already)
@@ -400,9 +517,6 @@ func AdvanceCrypto(ctx context.Context, h *CryptoHand, m *game.Machine, send fun
 		}
 	}
 	if m.NeedsReveal() {
-		// Snapshot once. Each replica must peel every remaining seat in the
-		// same order (local holes are already filled on one replica, so
-		// applying the last missing seat can settle before the loop ends).
 		ids := RemainingShowdownIDs(m.State)
 		for _, pid := range ids {
 			msgs, err := h.StartReveal(pid)
@@ -412,7 +526,10 @@ func AdvanceCrypto(ctx context.Context, h *CryptoHand, m *game.Machine, send fun
 			if err := send(msgs); err != nil {
 				return err
 			}
-			if err := h.WaitReveal(ctx); err != nil {
+			release()
+			err = h.WaitReveal(ctx)
+			acquire()
+			if err != nil {
 				return err
 			}
 			pair, err := h.RevealedHoles(pid)
@@ -569,6 +686,7 @@ type waitGate struct {
 	mu   sync.Mutex
 	ch   chan struct{}
 	done bool
+	err  error
 }
 
 func newWaitGate() *waitGate {
@@ -580,15 +698,21 @@ func (g *waitGate) reset() {
 	defer g.mu.Unlock()
 	g.ch = make(chan struct{})
 	g.done = false
+	g.err = nil
 }
 
 func (g *waitGate) signal() {
+	g.fail(nil)
+}
+
+func (g *waitGate) fail(err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.done {
 		return
 	}
 	g.done = true
+	g.err = err
 	close(g.ch)
 }
 
@@ -596,9 +720,10 @@ func (g *waitGate) wait(ctx context.Context, who string) error {
 	g.mu.Lock()
 	ch := g.ch
 	done := g.done
+	err := g.err
 	g.mu.Unlock()
 	if done {
-		return nil
+		return err
 	}
 	select {
 	case <-ctx.Done():
@@ -607,6 +732,9 @@ func (g *waitGate) wait(ctx context.Context, who string) error {
 		}
 		return fmt.Errorf("%s: %w", who, ctx.Err())
 	case <-ch:
-		return nil
+		g.mu.Lock()
+		err := g.err
+		g.mu.Unlock()
+		return err
 	}
 }

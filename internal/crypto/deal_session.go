@@ -315,6 +315,71 @@ func (s *DealSession) startSequenceLocked(kind seqKind, jobs []peelJob, street S
 }
 
 // HandlePeel is the sequencer for the current peel job.
+// ExpectedPeeler returns the player ID who must peel next, or "" if idle/done.
+func (s *DealSession) ExpectedPeeler() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expectedPeelerLocked()
+}
+
+func (s *DealSession) expectedPeelerLocked() string {
+	if s.seq == seqIdle || s.jobKind == jobIdle {
+		return ""
+	}
+	if s.nextPeel < 0 || s.nextPeel >= len(s.peelers) {
+		return ""
+	}
+	return s.peelers[s.nextPeel]
+}
+
+// PeelOnBehalf publishes a peel as playerID using key (a reconstructed d).
+// PlayerID on the PeelMessage is playerID, not LocalID.
+func (s *DealSession) PeelOnBehalf(playerID string, key *SRAKey) (*PeelMessage, error) {
+	if s == nil {
+		return nil, errors.New("PeelOnBehalf: session is nil")
+	}
+	if playerID == "" {
+		return nil, errors.New("PeelOnBehalf: empty player ID")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if playerID == s.kr.LocalID() {
+		return nil, errors.New("PeelOnBehalf: playerID is local; use the normal local path")
+	}
+	if s.seq == seqIdle || s.jobKind == jobIdle {
+		return nil, errors.New("PeelOnBehalf: no job in progress")
+	}
+	expected := s.expectedPeelerLocked()
+	if expected != playerID {
+		return nil, fmt.Errorf("PeelOnBehalf: expected peeler %q, got %q", expected, playerID)
+	}
+	if key == nil || !key.IsPrivate() {
+		return nil, errors.New("PeelOnBehalf: reconstructed key is missing d")
+	}
+	pd, err := Peel(key, s.current, s.cardIndex, playerID, s.sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("PeelOnBehalf: %w", err)
+	}
+	msg, err := PeelMessageFromPD(s.handNum, pd)
+	if err != nil {
+		return nil, fmt.Errorf("PeelOnBehalf: %w", err)
+	}
+	if err := s.applyIncomingLocked(msg); err != nil {
+		return nil, err
+	}
+	extra, err := s.afterApplyLocked()
+	if err != nil {
+		return nil, err
+	}
+	if extra != nil {
+		s.outbound = append(s.outbound, extra)
+	}
+	return msg, nil
+}
+
 func (s *DealSession) HandlePeel(msg *PeelMessage) (*PeelMessage, error) {
 	if s == nil {
 		return nil, errors.New("DealSession.HandlePeel: session is nil")

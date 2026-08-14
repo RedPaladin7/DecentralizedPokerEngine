@@ -51,6 +51,7 @@ type Node struct {
 	OnTimeoutVote    func(*TimeoutVote)
 	OnHandResult     func(*HandResult)
 	OnEquivocation   func(senderID string, envA, envB *Envelope)
+	OnKeyShare       func(msg *KeyShare, viaGossip bool)
 
 	streamPool *StreamPool
 }
@@ -116,10 +117,22 @@ func (n *Node) Start(ctx context.Context) error {
 	// Register the direct-stream handler for partial decrypts.
 	RegisterProtocolHandler(n.Host.Host, func(env *Envelope, from peer.ID) {
 		_ = n.Log.Append(env)
-		if env.Type == MsgType_PARTIAL_DECRYPT && n.OnPartialDecrypt != nil {
+		switch env.Type {
+		case MsgType_PARTIAL_DECRYPT:
+			if n.OnPartialDecrypt == nil {
+				return
+			}
 			msg := &PartialDecrypt{}
 			if proto.Unmarshal(env.Payload, msg) == nil {
 				n.OnPartialDecrypt(msg)
+			}
+		case MsgType_KEY_SHARE:
+			if n.OnKeyShare == nil {
+				return
+			}
+			msg, err := UnmarshalKeyShare(env.Payload)
+			if err == nil {
+				n.OnKeyShare(msg, false)
 			}
 		}
 	})
@@ -266,6 +279,16 @@ func (n *Node) dispatch(data []byte) {
 			return
 		}
 		n.OnHandResult(msg)
+
+	case MsgType_KEY_SHARE:
+		if n.OnKeyShare == nil {
+			return
+		}
+		msg, err := UnmarshalKeyShare(env.Payload)
+		if err != nil {
+			return
+		}
+		n.OnKeyShare(msg, true)
 	}
 }
 
@@ -385,10 +408,14 @@ func (n *Node) BroadcastPartialDecrypt(ctx context.Context, handNum int64, pd *p
 }
 
 func (n *Node) BroadcastAction(ctx context.Context, handNum int64, a game.Action, actionSeq int64) error {
+	playerID := a.PlayerID
+	if playerID == "" {
+		playerID = n.Host.PeerID
+	}
 	msg := &PlayerAction{
 		TableId:  n.tableID,
 		HandNum:  handNum,
-		PlayerId: n.Host.PeerID,
+		PlayerId: playerID,
 		Action:   int32(a.Type),
 		Amount:   a.Amount,
 		Seq:      actionSeq,
@@ -504,6 +531,29 @@ func (n *Node) SendDirectPartialDecrypt(ctx context.Context, toPeerID peer.ID, h
 	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
 	if err != nil {
 		return fmt.Errorf("EncodeEnvelope direct: %w", err)
+	}
+	return n.streamPool.Send(ctx, toPeerID, frame)
+}
+
+func (n *Node) BroadcastKeyShare(ctx context.Context, handNum int64, ownerID string, share pokercrypto.ShamirShare) error {
+	msg := KeyShareToWire(n.tableID, handNum, ownerID, share)
+	b, err := MarshalKeyShare(msg)
+	if err != nil {
+		return fmt.Errorf("marshal KeyShare: %w", err)
+	}
+	return n.publish(ctx, MsgType_KEY_SHARE, b)
+}
+
+func (n *Node) SendDirectKeyShare(ctx context.Context, toPeerID peer.ID, handNum int64, ownerID string, share pokercrypto.ShamirShare) error {
+	msg := KeyShareToWire(n.tableID, handNum, ownerID, share)
+	b, err := MarshalKeyShare(msg)
+	if err != nil {
+		return fmt.Errorf("marshal direct KeyShare: %w", err)
+	}
+	env := NewEnvelope(MsgType_KEY_SHARE, n.Host.PeerID, n.nextSeq(), b)
+	frame, err := EncodeEnvelope(env, n.Host.Ed25519PK)
+	if err != nil {
+		return fmt.Errorf("EncodeEnvelope direct KeyShare: %w", err)
 	}
 	return n.streamPool.Send(ctx, toPeerID, frame)
 }

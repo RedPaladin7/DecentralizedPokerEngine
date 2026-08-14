@@ -78,6 +78,26 @@ func TestPeelMessageWire_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestKeyShareWire_RoundTrip(t *testing.T) {
+	share := pokercrypto.ShamirShare{Index: 2, Value: big.NewInt(99)}
+	pb := KeyShareToWire("table-1", 0, "alice", share)
+	raw, err := MarshalKeyShare(pb)
+	if err != nil {
+		t.Fatalf("MarshalKeyShare: %v", err)
+	}
+	back, err := UnmarshalKeyShare(raw)
+	if err != nil {
+		t.Fatalf("UnmarshalKeyShare: %v", err)
+	}
+	if back.TableId != "table-1" || back.HandNum != 0 || back.OwnerId != "alice" {
+		t.Fatalf("header mismatch: %+v", back)
+	}
+	got := KeyShareFromWire(back)
+	if got.Index != 2 || got.Value.Cmp(share.Value) != 0 {
+		t.Fatalf("share mismatch: %+v", got)
+	}
+}
+
 func twoPlayerKeyrings(t *testing.T) []*pokercrypto.Keyring {
 	t.Helper()
 	p := pokercrypto.SharedPrime()
@@ -106,16 +126,21 @@ func twoPlayerKeyrings(t *testing.T) []*pokercrypto.Keyring {
 type fakeCryptoBus struct {
 	shuffle map[string]chan *pokercrypto.ShuffleMessage
 	peels   map[string]chan *pokercrypto.PeelMessage
+	shares  map[string]chan pokercrypto.ShamirShare
+	dead    map[string]bool
 }
 
 func newFakeCryptoBus(ids []string) *fakeCryptoBus {
 	b := &fakeCryptoBus{
 		shuffle: make(map[string]chan *pokercrypto.ShuffleMessage, len(ids)),
 		peels:   make(map[string]chan *pokercrypto.PeelMessage, len(ids)),
+		shares:  make(map[string]chan pokercrypto.ShamirShare, len(ids)),
+		dead:    make(map[string]bool, len(ids)),
 	}
 	for _, id := range ids {
 		b.shuffle[id] = make(chan *pokercrypto.ShuffleMessage, 32)
 		b.peels[id] = make(chan *pokercrypto.PeelMessage, 64)
+		b.shares[id] = make(chan pokercrypto.ShamirShare, 16)
 	}
 	return b
 }
@@ -126,7 +151,7 @@ func (b *fakeCryptoBus) broadcastShuffle(from string, msgs []*pokercrypto.Shuffl
 			continue
 		}
 		for id, ch := range b.shuffle {
-			if id == from {
+			if id == from || b.dead[id] {
 				continue
 			}
 			ch <- ShuffleMessageFromWire(ShuffleMessageToWire("t", msg))
@@ -142,7 +167,7 @@ func (b *fakeCryptoBus) broadcastPeels(from string, msgs []*pokercrypto.PeelMess
 		pd := PeelMessageToPD(msg)
 		pb := PartialDecryptToWire("t", msg.HandNum, pd)
 		for id, ch := range b.peels {
-			if id == from {
+			if id == from || b.dead[id] {
 				continue
 			}
 			ch <- PeelMessageFromWire(pb)
