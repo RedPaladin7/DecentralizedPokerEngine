@@ -32,9 +32,10 @@ type Node struct {
 	buyIn      int64
 	sraKey     *pokercrypto.SRAKey
 
-	seq   int64 // monotonic outbound message counter (atomic)
-	mu    sync.RWMutex
-	peers map[string]ed25519.PublicKey // cached public keys for signature verification
+	seq           int64 // monotonic outbound message counter (atomic)
+	joinTimestamp int64 // first local JOIN_TABLE stamp; reused on rebroadcast
+	mu            sync.RWMutex
+	peers         map[string]ed25519.PublicKey // cached public keys for signature verification
 
 	started bool
 
@@ -195,7 +196,9 @@ func (n *Node) dispatch(data []byte) {
 		if proto.Unmarshal(env.Payload, msg) != nil {
 			return
 		}
-		_ = n.Lobby.HandleJoin(msg, env.SenderId, env.Timestamp)
+		if err := n.Lobby.HandleJoin(msg, env.SenderId, env.Timestamp); err != nil {
+			return
+		}
 		if n.OnJoinTable != nil {
 			n.OnJoinTable(msg, env.SenderId)
 		}
@@ -340,7 +343,10 @@ func (n *Node) BroadcastJoin(ctx context.Context, handNum int64) error {
 	if err != nil {
 		return fmt.Errorf("marshal JoinTable: %w", err)
 	}
-	selfTimestamp := time.Now().UnixMilli()
+	if n.joinTimestamp == 0 {
+		n.joinTimestamp = time.Now().UnixMilli()
+	}
+	selfTimestamp := n.joinTimestamp
 	_ = n.Lobby.HandleJoin(msg, n.Host.PeerID, selfTimestamp)
 
 	env := NewEnvelope(MsgType_JOIN_TABLE, n.Host.PeerID, n.nextSeq(), b)

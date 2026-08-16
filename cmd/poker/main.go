@@ -553,8 +553,13 @@ func runP2PMode(ctx context.Context, cfg *config.Config, noCrypto bool) error {
 	}
 
 	// ── Wait for lobby to fill ────────────────────────────────────────────────
+	// Rebroadcast JOIN_TABLE while waiting: GossipSub is not a log, so a peer
+	// who subscribes later never sees the original publish. Repeats use the
+	// frozen join timestamp so seat order stays the same.
 	pollTick := time.NewTicker(250 * time.Millisecond)
+	joinRepeat := time.NewTicker(2 * time.Second)
 	defer pollTick.Stop()
+	defer joinRepeat.Stop()
 waitLoop:
 	for {
 		select {
@@ -563,6 +568,13 @@ waitLoop:
 		case <-pollTick.C:
 			if node.Lobby.Count() >= cfg.Game.MaxSeats {
 				break waitLoop
+			}
+		case <-joinRepeat.C:
+			if node.Lobby.Count() >= cfg.Game.MaxSeats {
+				break waitLoop
+			}
+			if err := node.BroadcastJoin(ctx, 1); err != nil {
+				fmt.Printf("[error] rebroadcast join: %v\n", err)
 			}
 		}
 	}

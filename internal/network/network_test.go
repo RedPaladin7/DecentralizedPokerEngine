@@ -719,6 +719,100 @@ func TestNode_BroadcastJoin_LobbyUpdated(t *testing.T) {
 	}
 }
 
+func TestBroadcastJoin_RebroadcastKeepsTimestamp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	n := makeTestNode(t, "join-ts-test", "Alice")
+	if err := n.BroadcastJoin(ctx, 1); err != nil {
+		t.Fatalf("first BroadcastJoin: %v", err)
+	}
+	seats := n.Lobby.Seats()
+	if len(seats) != 1 {
+		t.Fatalf("expected 1 seat after first join, got %d", len(seats))
+	}
+	firstTS := seats[0].JoinedAtUnixMs
+	if firstTS == 0 {
+		t.Fatal("expected non-zero join timestamp")
+	}
+	if n.joinTimestamp != firstTS {
+		t.Fatalf("node joinTimestamp %d != lobby %d", n.joinTimestamp, firstTS)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	if err := n.BroadcastJoin(ctx, 1); err != nil {
+		t.Fatalf("second BroadcastJoin: %v", err)
+	}
+	seats = n.Lobby.Seats()
+	if len(seats) != 1 {
+		t.Fatalf("rebroadcast must not add a seat, got %d", len(seats))
+	}
+	if seats[0].JoinedAtUnixMs != firstTS {
+		t.Errorf("rebroadcast changed JoinedAtUnixMs: first %d, then %d", firstTS, seats[0].JoinedAtUnixMs)
+	}
+	if n.joinTimestamp != firstTS {
+		t.Errorf("joinTimestamp mutated on rebroadcast: got %d want %d", n.joinTimestamp, firstTS)
+	}
+}
+
+func TestDispatch_DuplicateJoin_DoesNotCallback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	n := makeTestNode(t, "dup-join-cb", "Alice")
+	pub, priv := generateTestEd25519()
+	n.RegisterPeer("p1", pub)
+
+	payload, err := proto.Marshal(&JoinTable{
+		TableId:      "dup-join-cb",
+		PlayerName:   "Bob",
+		BuyIn:        100,
+		SessionNonce: []byte("p1"),
+	})
+	if err != nil {
+		t.Fatalf("marshal JoinTable: %v", err)
+	}
+
+	calls := 0
+	n.OnJoinTable = func(*JoinTable, string) { calls++ }
+
+	env1 := NewEnvelope(MsgType_JOIN_TABLE, "p1", 1, payload)
+	env1.Timestamp = 1000
+	frame1, err := EncodeEnvelope(env1, priv)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope first: %v", err)
+	}
+	n.dispatch(frame1)
+	if calls != 1 {
+		t.Fatalf("first join callback count: got %d want 1", calls)
+	}
+	seats := n.Lobby.Seats()
+	if len(seats) != 1 || seats[0].JoinedAtUnixMs != 1000 {
+		t.Fatalf("first join not stored with timestamp 1000: %+v", seats)
+	}
+
+	env2 := NewEnvelope(MsgType_JOIN_TABLE, "p1", 2, payload)
+	env2.Timestamp = 99999
+	frame2, err := EncodeEnvelope(env2, priv)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope second: %v", err)
+	}
+	n.dispatch(frame2)
+	if calls != 1 {
+		t.Errorf("duplicate join must not callback: got %d want 1", calls)
+	}
+	seats = n.Lobby.Seats()
+	if len(seats) != 1 {
+		t.Fatalf("duplicate join added a seat: %d", len(seats))
+	}
+	if seats[0].JoinedAtUnixMs != 1000 {
+		t.Errorf("duplicate join changed timestamp: got %d want 1000", seats[0].JoinedAtUnixMs)
+	}
+}
+
 func TestNode_ThreePeerMesh_AllReceive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping network integration test in -short mode")
