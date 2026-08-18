@@ -125,6 +125,7 @@ A fourth picture sits beside them and almost never talks to the first three:
 34. [Where each struct lives](#where-each-struct-lives)
 35. [Questions you actually asked, answered short](#questions-you-actually-asked-answered-short)
 36. [Glossary](#glossary)
+37. [A second pass: gossip, host, streams, lobby, log](#a-second-pass-gossip-host-streams-lobby-log)
 
 ---
 
@@ -1573,3 +1574,113 @@ Ed25519 on every gossip envelope (identity). ZK “signature of knowledge” of 
 12. Several cryptographies, several jobs: Noise for hops, Ed25519 for authors, SRA for cards, ZK for honest peels, Shamir for the dead lock-holder.
 
 When a phase chapter tells you to open a file, you should now know **why that file exists**. That was the point of the story.
+
+---
+
+## A second pass: gossip, host, streams, lobby, log
+
+You had a picture of the pipes. Most of it is right. The mistakes are the interesting ones.
+
+### GossipManager — two topics, not one truth machine
+
+Yes. `GossipManager` is GossipSub: publish, subscribe, mesh forwarding. Two topics:
+
+| Topic | Name | What it is for |
+|---|---|---|
+| Table | `poker/table/<tableID>` | Joins, ready, shuffle steps, peels, betting actions, timeout votes, hand-result postcards, reconstruction shares |
+| Heartbeat | `poker/heartbeat/<tableID>` | “I am still here,” on a ticker |
+
+**Table topic.** Everybody who subscribed eventually gets a copy. Delivery is best-effort and **unordered**. That is not a ledger.
+
+You do **not** publish your shuffle permutation. That slice of integers never leaves RAM. A `SHUFFLE_STEP` is the **output deck** plus a **commitment** (hash + nonce). Peers check the commitment opens to those bytes, then adopt the deck. If the permutation went on the wire, everyone could unmix it.
+
+A `PLAYER_ACTION` on the topic is also not automatically a legal move. The path is:
+
+1. Envelope must verify (Ed25519). Gossip hops only prove the last TCP peer; the signature proves the author.
+2. `Envelope.seq` must be new for that sender (replay protection).
+3. `actionSequencer` holds the payload until global `PlayerAction.Seq` is the next number. Gossip may deliver raise-3 before fold-1.
+4. `Machine.ApplyAction` still rejects “not your turn,” “cannot check,” and the rest.
+
+The person who acts applies **locally first**, then gossips. Dave must not wait for the network to tell Dave that Dave folded. Everyone else applies when the sequencer releases that `Seq`. Then `GameState.Log` grows. Seeing bytes on the topic is how they *hear* the move. The machine is how they *accept* it.
+
+Two logs, do not mash them:
+
+- `GameState.Log` — poker `Action` structs for this hand (fold / call / raise).
+- `Gamelog` — every signed **envelope** (shuffle, peels, actions, …). Evidence, including “Dave signed two different seq-1 stories.”
+
+**Heartbeat topic.** Design: every few seconds (default 5) each process publishes `HEARTBEAT`. Everyone else, on receipt, stamps `LastSeen` for that Peer ID. After ~15 seconds of silence, a timeout vote can start. It is not a full mesh of unicast pings. One publish, many subscribers.
+
+Honest gap, already in chapter 23: `BroadcastHeartbeat` writes the heartbeat topic, but `Node.receiveLoop` today only reads the **table** topic. `NewHeartbeatMessage` exists and has no caller. The vote/fold/Shamir *policy* is wired. The intended “keep LastSeen fresh from the heartbeat topic” loop is not started. Do not assume live beats are refreshing the monitor until that second loop exists.
+
+### PokerHost — “I am a peer,” not “I am the dealer”
+
+`PokerHost` is the libp2p body. Without it there are no sockets.
+
+It holds:
+
+- the Ed25519 identity (`identity.key`) and the **Peer ID** derived from it
+- the TCP listen address (`/ip4/0.0.0.0/tcp/9000`)
+- Noise encryption on each direct connection
+- the **peerstore** (local phone book: Peer ID → addresses)
+- stream multiplexing (many logical streams on one TCP session)
+
+`GossipManager` and `StreamPool` sit on this host. mDNS writes addresses into this peerstore and then dials. The CLI word `poker host` only means “I bound the port first.” After the mesh forms, Alice’s `PokerHost` is the same kind of object as Bob’s.
+
+Think: the radio and the nametag. Not the referee.
+
+### StreamPool — unicast, mainly Shamir, also extra peels
+
+Yes on the main job. After the lobby is full and the `Keyring` exists, **once per table** (not every hand — `d` does not rotate), each player splits their private exponent `d` with Shamir and **unicasts** one share to each other seat on `/poker/1.0.0`. Alice keeps her own share locally. Bob never receives Alice’s whole `d`. He receives one point on her polynomial.
+
+That unicast is deliberate. Shares of a living player must not ride the shuffle/peel gossip bus. If they did, any two colluding listeners could reconstruct a living `d`. After a timeout, survivors **gossip** the shares they already hold (`BroadcastKeyShare`) so Lagrange can rebuild the missing key. Two different moments, two different pipes.
+
+`StreamPool` is also used for **extra copies** of `PARTIAL_DECRYPT`. Gossip on the table topic is still the authoritative peel. The stream is a spare tire when GossipSub drops a step (chapter 25).
+
+So: StreamPool = direct libp2p messages to one Peer ID. Not a second pub/sub.
+
+### Lobby — waiting room and seat order, not the bank
+
+Too small a picture. `Lobby` is the waiting room **before** the first card, and the source of **canonical seat order**.
+
+Each `SeatInfo` stores:
+
+- Peer ID (who they are on the mesh)
+- display name (`Alice`)
+- buy-in at join (starting chips for this table, e.g. 1000)
+- public SRA exponent `e` only — **not** the Ed25519 identity key, and **not** `d`
+- join timestamp (used to sort seats)
+- ready flag
+- a join nonce (concatenated later into the crypto session id)
+
+What it does **not** store: live stacks, hole cards, whose turn, the pot. Those live on `GameState` / `Player` after the engine starts. Buy-in is “how many chips they sat down with.” Stacks move when pots are paid.
+
+When `Count() == maxSeats`, each node broadcasts `PLAYER_READY`. When every seat is ready, the barrier opens. Then: build `Keyring` from the public `e`s and the sorted Peer IDs, unicast Shamir shares, seat 0 starts the shuffle.
+
+Without the lobby, four laptops would not agree who is seat 0.
+
+### Gamelog — designed per hand; the object is replaced, not grown forever
+
+Designed as **one log per hand**. `Gamelog` is an append-only list of signed envelopes for that `handNum`, plus `StateRoot()` (a hash of the trail) and `DetectEquivocation`. It is the paper trail, not consensus.
+
+`Node.SetHandNum` throws the old log away and starts `NewGameLog` for the new number. It does not replay.
+
+`GameState.Log` is definitely per hand: a new `GameState` is built each time.
+
+Honest gap: the live `startNextHand` path today updates `FaultManager.SetHandNum` and builds a new `Machine`, but does **not** call `Node.SetHandNum`. So the *type* is per-hand; the *running process* may keep appending envelopes onto the same `Gamelog` object across hands until that call is wired. If you are tracing evidence, check whether `SetHandNum` ran.
+
+```
+process
+  PokerHost          radio + Peer ID + peerstore
+       │
+       ├── GossipManager
+       │     table topic      ──► shuffle / peels / actions / votes
+       │     heartbeat topic  ──► “still here” (design)
+       └── StreamPool         ──► Shamir shares at table start
+                                  extra peel copies
+
+  Lobby               seats, public e, ready, seat order
+  Keyring             my d, their e, same seat order
+  Gamelog             signed envelopes (evidence)
+  GameState.Log       poker actions this hand
+```
+

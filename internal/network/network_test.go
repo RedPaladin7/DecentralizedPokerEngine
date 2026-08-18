@@ -535,6 +535,40 @@ func TestReplayProtection_IndependentPerPeer(t *testing.T) {
 	}
 }
 
+func TestReplayProtection_HeartbeatDoesNotBlockTableSeq(t *testing.T) {
+	gm := &GossipManager{
+		seqNums:   make(map[string]int64),
+		hbSeqNums: make(map[string]int64),
+	}
+
+	if err := gm.CheckAndUpdateHeartbeatSeq("alice", 11); err != nil {
+		t.Fatalf("heartbeat seq 11 should be accepted: %v", err)
+	}
+	// Shared watermark would reject table seq 10 after beat 11.
+	if err := gm.CheckAndUpdateSeq("alice", 10); err != nil {
+		t.Fatalf("table seq 10 must still be accepted after heartbeat seq 11: %v", err)
+	}
+	if err := gm.CheckAndUpdateSeq("alice", 12); err != nil {
+		t.Fatalf("table seq 12 should be accepted: %v", err)
+	}
+	if err := gm.CheckAndUpdateHeartbeatSeq("alice", 11); err == nil {
+		t.Error("duplicate heartbeat seq 11 should be rejected")
+	}
+	if err := gm.CheckAndUpdateHeartbeatSeq("alice", 5); err == nil {
+		t.Error("old heartbeat seq 5 should be rejected after seq 11")
+	}
+}
+
+func TestReplayProtection_HeartbeatGapsAllowed(t *testing.T) {
+	gm := &GossipManager{hbSeqNums: make(map[string]int64)}
+	if err := gm.CheckAndUpdateHeartbeatSeq("alice", 11); err != nil {
+		t.Fatalf("seq 11: %v", err)
+	}
+	if err := gm.CheckAndUpdateHeartbeatSeq("alice", 14); err != nil {
+		t.Fatalf("seq 14 (gap for table traffic) should be accepted: %v", err)
+	}
+}
+
 // ── Proto round-trip tests ────────────────────────────────────────────────────
 
 func TestProto_ShuffleStep_RoundTrip(t *testing.T) {
@@ -655,6 +689,134 @@ func TestNode_BroadcastAndReceiveAction(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Error("timeout: action not received within 10s")
+	}
+}
+
+func TestDispatchHeartbeat_DoesNotAppendGamelog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	n := makeTestNode(t, "hb-log-test", "Alice")
+	pub, priv := generateTestEd25519()
+	n.RegisterPeer("p1", pub)
+
+	got := make(chan string, 1)
+	n.OnHeartbeat = func(msg *Heartbeat, sender string) {
+		got <- sender
+	}
+
+	payload, err := proto.Marshal(&Heartbeat{TableId: "hb-log-test", HandNum: 1, Seq: 3})
+	if err != nil {
+		t.Fatalf("marshal Heartbeat: %v", err)
+	}
+	env := NewEnvelope(MsgType_HEARTBEAT, "p1", 7, payload)
+	frame, err := EncodeEnvelope(env, priv)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope: %v", err)
+	}
+
+	before := n.Log.Len()
+	n.dispatchHeartbeat(frame)
+	select {
+	case sender := <-got:
+		if sender != "p1" {
+			t.Errorf("OnHeartbeat sender: got %q want p1", sender)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnHeartbeat was not called")
+	}
+	if n.Log.Len() != before {
+		t.Errorf("heartbeat must not append Gamelog: before %d after %d", before, n.Log.Len())
+	}
+
+	// Replay of the same envelope seq must not fire again.
+	n.dispatchHeartbeat(frame)
+	select {
+	case <-got:
+		t.Error("duplicate heartbeat seq must not callback again")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestDispatch_TableIgnoresHeartbeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	n := makeTestNode(t, "hb-table-ignore", "Alice")
+	pub, priv := generateTestEd25519()
+	n.RegisterPeer("p1", pub)
+
+	called := false
+	n.OnHeartbeat = func(*Heartbeat, string) { called = true }
+
+	payload, err := proto.Marshal(&Heartbeat{TableId: "hb-table-ignore", HandNum: 1, Seq: 1})
+	if err != nil {
+		t.Fatalf("marshal Heartbeat: %v", err)
+	}
+	env := NewEnvelope(MsgType_HEARTBEAT, "p1", 10, payload)
+	frame, err := EncodeEnvelope(env, priv)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope: %v", err)
+	}
+	before := n.Log.Len()
+	n.dispatch(frame)
+	if called {
+		t.Error("table dispatch must ignore HEARTBEAT")
+	}
+	if n.Log.Len() != before {
+		t.Error("table dispatch must not log HEARTBEAT")
+	}
+	// Table watermark must be untouched so a later table seq 10 would still work
+	// if a beat had stolen it. Seq 9 on the table path should still be accepted.
+	joinPayload, err := proto.Marshal(&JoinTable{
+		TableId: "hb-table-ignore", PlayerName: "Bob", BuyIn: 100, SessionNonce: []byte("p1"),
+	})
+	if err != nil {
+		t.Fatalf("marshal JoinTable: %v", err)
+	}
+	joinEnv := NewEnvelope(MsgType_JOIN_TABLE, "p1", 9, joinPayload)
+	joinEnv.Timestamp = 1000
+	joinFrame, err := EncodeEnvelope(joinEnv, priv)
+	if err != nil {
+		t.Fatalf("EncodeEnvelope join: %v", err)
+	}
+	n.dispatch(joinFrame)
+	if n.Lobby.Count() != 1 {
+		t.Errorf("table seq 9 after ignored heartbeat should still join: seats %d", n.Lobby.Count())
+	}
+}
+
+func TestNode_BroadcastAndReceiveHeartbeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network integration test in -short mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	nodeA := makeTestNode(t, "hb-net-test", "Alice")
+	nodeB := makeTestNode(t, "hb-net-test", "Bob")
+	connectNodes(t, nodeA, nodeB)
+
+	received := make(chan string, 1)
+	nodeB.OnHeartbeat = func(msg *Heartbeat, sender string) {
+		received <- sender
+	}
+
+	logBefore := nodeB.Log.Len()
+	if err := nodeA.BroadcastHeartbeat(ctx, 1, 1); err != nil {
+		t.Fatalf("BroadcastHeartbeat: %v", err)
+	}
+
+	select {
+	case sender := <-received:
+		if sender != nodeA.Host.PeerID {
+			t.Errorf("heartbeat sender: got %q want %q", sender, nodeA.Host.PeerID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("timeout: heartbeat not received within 10s")
+	}
+	if nodeB.Log.Len() != logBefore {
+		t.Errorf("received heartbeat must not append Gamelog: before %d after %d", logBefore, nodeB.Log.Len())
 	}
 }
 

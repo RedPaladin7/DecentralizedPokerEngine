@@ -100,11 +100,11 @@ func NewNode(
 	}, nil
 }
 
-// Start begins MDNS discovery, the GossipSub receive loop, and the
-// equivocation scanner.
+// Start begins MDNS discovery, the GossipSub table and heartbeat receive
+// loops, and the equivocation scanner.
 //
 // IMPORTANT: Set all OnXxx callbacks before calling Start().
-// The receive goroutine starts immediately and will silently drop any message
+// The receive goroutines start immediately and will silently drop any message
 // whose callback is nil at the time the message arrives.
 func (n *Node) Start(ctx context.Context) error {
 	n.mu.Lock()
@@ -156,6 +156,7 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 
 	go n.receiveLoop(ctx)
+	go n.heartbeatReceiveLoop(ctx)
 	go n.equivocationScanLoop(ctx)
 	return nil
 }
@@ -174,14 +175,62 @@ func (n *Node) receiveLoop(ctx context.Context) {
 	}
 }
 
-// dispatch decodes an envelope and calls the appropriate OnXxx callback.
-func (n *Node) dispatch(data []byte) {
+// heartbeatReceiveLoop reads poker/heartbeat/<table> so last-seen is refreshed
+// without sharing the table-topic seq watermark.
+func (n *Node) heartbeatReceiveLoop(ctx context.Context) {
+	for {
+		data, _, err := n.Gossip.NewHeartbeatMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			continue
+		}
+		n.dispatchHeartbeat(data)
+	}
+}
+
+// decodeRemoteEnvelope verifies the signature and drops self-echo.
+func (n *Node) decodeRemoteEnvelope(data []byte) *Envelope {
 	env, err := DecodeEnvelope(data, n.lookupPubKey)
 	if err != nil {
+		return nil
+	}
+	if env.SenderId == n.Host.PeerID {
+		return nil
+	}
+	return env
+}
+
+// dispatchHeartbeat handles HEARTBEAT envelopes from the heartbeat topic.
+// Replay protection uses hbSeqNums. Beats are not appended to Gamelog.
+func (n *Node) dispatchHeartbeat(data []byte) {
+	env := n.decodeRemoteEnvelope(data)
+	if env == nil || env.Type != MsgType_HEARTBEAT {
 		return
 	}
-	// Ignore our own messages echoed back by GossipSub.
-	if env.SenderId == n.Host.PeerID {
+	if err := n.Gossip.CheckAndUpdateHeartbeatSeq(env.SenderId, env.Seq); err != nil {
+		return
+	}
+	if n.OnHeartbeat == nil {
+		return
+	}
+	msg := &Heartbeat{}
+	if proto.Unmarshal(env.Payload, msg) != nil {
+		return
+	}
+	n.OnHeartbeat(msg, env.SenderId)
+}
+
+// dispatch decodes a table-topic envelope and calls the appropriate OnXxx callback.
+func (n *Node) dispatch(data []byte) {
+	env := n.decodeRemoteEnvelope(data)
+	if env == nil {
+		return
+	}
+	// Heartbeats belong on the heartbeat topic. Ignore them here so they
+	// cannot advance the table seq watermark or enter Gamelog.
+	if env.Type == MsgType_HEARTBEAT {
 		return
 	}
 	// Replay protection: drop old or duplicate sequence numbers.
@@ -252,16 +301,6 @@ func (n *Node) dispatch(data []byte) {
 			return
 		}
 		n.OnGameStateSync(msg)
-
-	case MsgType_HEARTBEAT:
-		if n.OnHeartbeat == nil {
-			return
-		}
-		msg := &Heartbeat{}
-		if proto.Unmarshal(env.Payload, msg) != nil {
-			return
-		}
-		n.OnHeartbeat(msg, env.SenderId)
 
 	case MsgType_TIMEOUT_VOTE:
 		if n.OnTimeoutVote == nil {

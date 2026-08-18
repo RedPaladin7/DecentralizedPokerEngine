@@ -34,8 +34,9 @@ type GossipManager struct {
 	heartbeatTopic *pubsub.Topic
 	tableSub *pubsub.Subscription
 	heartbeatSub *pubsub.Subscription
-	mu sync.Mutex
-	seqNums map[string]int64 // last accepted seq per sender, solely for replay protection
+	mu        sync.Mutex
+	seqNums   map[string]int64 // table topic: last accepted envelope seq per sender
+	hbSeqNums map[string]int64 // heartbeat topic: separate watermark so beats cannot drop table msgs
 }
 
 func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*GossipManager, error) {
@@ -68,7 +69,8 @@ func NewGossipManager(ctx context.Context, h host.Host, tableID string) (*Gossip
 		heartbeatTopic: ht,
 		tableSub: ts,
 		heartbeatSub: hs,
-		seqNums: make(map[string]int64),
+		seqNums:   make(map[string]int64),
+		hbSeqNums: make(map[string]int64),
 	}, nil
 }
 
@@ -108,12 +110,28 @@ func (gm *GossipManager) NewHeartbeatMessage(ctx context.Context) ([]byte, peer.
 func (gm *GossipManager) CheckAndUpdateSeq(senderID string, seq int64) error {
 	gm.mu.Lock()
 	defer gm.mu.Unlock()
-	last, exists := gm.seqNums[senderID]
+	return updateSeqMap(gm.seqNums, senderID, seq)
+}
+
+// CheckAndUpdateHeartbeatSeq is replay protection for the heartbeat topic only.
+// It must not share seqNums with the table topic: envelope seq is one counter
+// per sender (Node.nextSeq), so a beat at seq 11 would otherwise drop a
+// later-arriving shuffle/action at seq 10.
+func (gm *GossipManager) CheckAndUpdateHeartbeatSeq(senderID string, seq int64) error {
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+	if gm.hbSeqNums == nil {
+		gm.hbSeqNums = make(map[string]int64)
+	}
+	return updateSeqMap(gm.hbSeqNums, senderID, seq)
+}
+
+func updateSeqMap(m map[string]int64, senderID string, seq int64) error {
+	last, exists := m[senderID]
 	if exists && seq <= last {
 		return fmt.Errorf("")
 	}
-	// new message must have greater seq num than the last received
-	gm.seqNums[senderID] = seq
+	m[senderID] = seq
 	return nil
 }
 
