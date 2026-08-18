@@ -126,6 +126,14 @@ They already subscribed to `poker/table/friday`. That is where they hear each ot
 
 The identity public key is not a separate gift in the shout. It can be derived from the Peer ID they already have. When a signed message says it is from Alice, the other laptop pulls the public key out of that Peer ID and checks the signature. If it does not match, the message is dropped. The program may cache that derived key so it does not redo the extract every time. That cache is not a second identity. SRA `e` is different: that one is stored on the seat, from the join shout.
 
+Subscribing does not reach Alice by itself. Joining `poker/table/friday` is **local**: Bob’s GossipSub now cares about that name. It is not a global radio and not a directory. This project has no DHT and no rendezvous server.
+
+GossipSub only moves bytes over **existing libp2p pipes**. Until Bob has TCP+Noise to someone already in that room (usually Alice), his subscription has nobody to talk to. His receive loop just blocks. Alice’s join shouts from before he connected are already gone.
+
+mDNS (or `--peer`) is the missing first step: **who is here, and what address do I dial?** After the pipe is up, GossipSub compares topic names, grafts him into `friday`, and *then* Alice’s next `JOIN_TABLE` can arrive.
+
+So: mDNS finds a machine. The topic finds a room **on that machine**. Without the first, the second is an empty room.
+
 ---
 
 ## Carol joins
@@ -152,3 +160,51 @@ There are two graphs, both already live:
 - **Gossip.** GossipSub started when each Node was built. A shout on `poker/table/friday` goes to neighbors on that topic. A neighbor may forward it. The laptop you heard it from might not be the author. That is why the envelope is signed.
 
 With four friends, the gossip neighborhood is big enough that it often looks like “everyone to everyone” too. Hopping still works if someone only has a pipe to Alice (`--peer`), or mDNS missed a laptop. There is no later step that builds a different mesh. Unicast later is the other path: it wants a direct pipe, not a hop.
+
+If John starts poker with `--table friday2`, mDNS still finds him. Same tag: `p2p-poker-v1`. Alice, Bob, or Carol can TCP+Noise to him and put him in the peerstore. He is not in their Lobby. He subscribed to `poker/table/friday2`. They subscribed to `poker/table/friday`. His join shouts never hit their receive loop. A pipe is not a seat. `--table` is the room name, not a lock on the TCP connection.
+
+What they publish in the room is not a raw string. It is a framed protobuf **Envelope**: who sent it (Peer ID), a sequence number, the join time, the inner message, and an Ed25519 signature. The inner message is another protobuf — for a join, name, buy-in, and public `e`.
+
+Bob already has Alice’s Peer ID from mDNS so he can dial her. That is not how he checks her shout. The shout carries her Peer ID as `sender_id`. He pulls the public key out of **that** id and verifies the signature. Match → it was signed by Alice’s identity. No match → drop. The bytes might have hopped through Carol. The signature still says Alice.
+
+---
+
+## Dave joins
+
+Dave types the same kind of command:
+
+`poker join --name Dave --table friday --seats 4`
+
+Same program, same setup, same two `friday` rooms, own Node. mDNS, peerstore, TCP+Noise, then `JOIN_TABLE`. Alice, Bob, and Carol are still repeating their joins, so he hears all three, checks the signatures, and builds **his** seat list with their public `e` values. They hear him and add him. Four Lobbies sort by join time, then Peer ID. Same four people, same order.
+
+The wait loop was only watching the seat count. It now sees 4. Join shouts stop. A fifth laptop can still connect on mDNS, but `HandleJoin` will not give it a seat.
+
+Four seats is not yet “ready.” Ready is a second signed shout, `PLAYER_READY`, on `poker/table/friday`. There is no button. As soon as a process sees 4 seats, it publishes ready and marks itself ready locally. Alice is not in charge of that. All four do it when their own loop notices.
+
+The Lobby becomes ready only when every seat has that flag. The live wait loop does not sit on that wake-up channel. After it broadcasts ready it just pauses two seconds so the other readys can arrive, then it leaves the waiting room. Cards, heartbeats, and the table UI have not started. Those come next.
+
+After the two-second pause, nobody has clicked anything. Each laptop still builds the same shared facts from the seat list it already has.
+
+Every join shout carried a small blob: that player’s Peer ID bytes. Each Lobby now glues those blobs together, in the same seat order (join time, then Peer ID). That combined blob is the session nonce. From it they also mix a shared seed. The seed is what `--no-crypto` uses as the fake deck shuffle. The real crypto path still builds the seed; it just does not deal from it.
+
+Then they copy the lobby seats into a player list, still in that same order. This is hand 1. The dealer is index 0 — the first name in that sorted list. That is not “Alice the host.” If Dave’s join time was first, Dave is dealer.
+
+Now they start heartbeats, before any cards. The heartbeat room `poker/heartbeat/friday` was already subscribed from the start. What is new is they begin shouting “I am here” on it, every few seconds, signed like the rest. A FaultManager on each laptop watches those shouts so a silent player can later be called out. Shuffle has not started.
+
+Still no cards. Each laptop now builds a Keyring: its own full SRA pair `(e, d)`, plus everyone else’s public `e` from the join shouts, in the same seat order. Nobody else’s `d` is in that box. All four do this from the seat list they already have. Nobody sends a copy of the Keyring.
+
+If any seat is missing `e` — someone sat down with `--no-crypto` while the others did not — the process exits. Mixed tables are not allowed.
+
+Then each player splits their own secret `d` into four shares. They keep one share. The other three go one-to-one to the other seats. That is when StreamPool finally fills. Until now the box was empty: the `/poker/1.0.0` handler was registered at connect, but no unicast stream was opened just because a TCP+Noise pipe existed. Sending a share is the first `Send`. StreamPool opens `/poker/1.0.0` on the pipe they already have — no second TCP handshake — and keeps that stream so later one-to-one messages (peels) can reuse it. The shares are not shouted on `poker/table/friday`. They are sent once for the table, not every hand. Later, if someone vanishes, enough of those shares can rebuild that player’s `d`. Shuffle has not started.
+
+## Game Start
+
+Now shuffling starts. There is still no table UI and nobody clicks a button. All four laptops enter the same card pipeline on their own. Each builds a CryptoHand and starts the shuffle machine.
+
+The starting deck is not Alice’s secret. It is fifty-two known numbers, the same on every laptop, one value per card in a fixed order everyone already knows. Anyone can rebuild that list. What must stay secret is the mixing.
+
+Only seat 0 has a first message to send. In this friday story that is Alice, because she joined first. She is also dealer this hand, because the dealer is index 0. She is not special because she typed `host`.
+
+Alice locks every card with her public SRA `e`. Then she secretly rearranges the fifty-two locked cards. That new order stays on her laptop. It is a fresh random mix, not the shared seed. She also makes a fingerprint of the deck she is about to publish, so nobody can swap a card later and claim it was the same shout.
+
+She publishes that locked-and-moved deck, plus the fingerprint, as a signed `SHUFFLE_STEP` on `poker/table/friday`. Not the permutation. Not `d`. Bob, Carol, and Dave’s machines have already started their shuffle and are waiting. If Alice’s shout arrives before someone’s shuffle machine exists, that laptop parks it and applies it a moment later. Alice now waits for their steps. The deck is not fully shuffled yet.
