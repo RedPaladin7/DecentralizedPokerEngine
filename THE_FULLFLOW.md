@@ -220,3 +220,120 @@ Now it is Bob’s turn. He locks every number in Alice’s pile with **his** `e`
 After Dave’s shout, all four laptops hold the same fifty-two numbers, each locked by all four `e`s, in an order nobody is supposed to map back. That shared pile is the deck they will peel from. The table UI is still not open. Hole cards have not been dealt.
 
 Each laptop then waits until it has seen every step, not just its own. Alice does not start dealing after her shout. Only when all four `SHUFFLE_STEP`s are in — Alice, Bob, Carol, Dave — is the shuffle done. They sit on that wait for up to two minutes. If someone vanishes in the middle of their mix, the wait fails and the hand dies. That player’s secret order was only in their RAM. The Shamir shares can rebuild a missing `d` later; they cannot rebuild a mix that was never published. Restart the table. The shared pile is ready. Peels come next.
+
+## Peel
+
+The shuffle wait is over. Before anyone peels a lock, each laptop copies that shared pile into a DealSession: the same fifty-two locked numbers, the Keyring it already has, this hand number, and who the dealer is. Nobody sends this object. All four build it from facts they already share.
+
+The dealer index is used here to decide who gets which slot from the top of the pile. It is not “who shuffled first.” Shuffle always started at seat 0. This hand Alice is both, because she is first in the sorted list.
+
+Then they write the hole-card jobs. Two rounds, like a real deal: first card to the seat after the dealer, then around the seat list, then a second card the same way. Alice is dealer, so slot 0 is for Bob, slot 1 for Carol, slot 2 for Dave, slot 3 for Alice. Then those same four get a second card from slots 4–7. Faces are still locked. A slot is not a readable card.
+
+Unlocking starts right away, one slot at a time. Bob cannot unlock slot 0 by himself. That number still has Alice’s, Carol’s, and Dave’s locks.
+
+The people who publish a peel are everyone except the person getting the card, in seat-list order. For Bob’s first card that is Alice, then Carol, then Dave — not “the next seat after Bob.” Each peel uses that player’s secret `d` and carries a small proof that the peel was real. Junk (a number that is not that lock coming off) gets caught here. The proof is not the rank and not `d`.
+
+Each published peel is a signed `PARTIAL_DECRYPT` shout on `poker/table/friday`. They also try to send the same peel one-to-one on `/poker/1.0.0` (StreamPool, the pipes opened for Shamir shares). Gossip is the real delivery. The extra copy is a shortcut. Duplicates are ignored. A peel that arrives early is parked until its turn, same idea as a shuffle step.
+
+Alice peels slot 0 first, publishes, and the other three copy that new number after they check the signature and the proof. Then Carol, then Dave. After Dave, only Bob’s lock is left. Only Bob’s laptop takes that last lock off. He does not publish it. Alice, Carol, and Dave keep the leftover number. They cannot turn it into a face.
+
+Then the next job: Carol’s first card, skip Carol in the peel list. Eight jobs in all. They wait until every hole job is done — same kind of two-minute wait as shuffle. Then each laptop reads only its own two faces. Opponent holes stay empty. The table UI is still not open.
+
+Those three shouts are not three separate peels of the original four-lock number. They are a chain. Alice’s shout says: I started from slot 0 as we all have it, I took my lock off, here is the new number. Carol must peel **that** number, not the original. Dave peels Carol’s leftover. Bob does not add three leftovers together. He waits until Alice, then Carol, then Dave have each taken one lock off, and then he takes his own lock off the last leftover, only on his laptop.
+
+The `PARTIAL_DECRYPT` shout carries which slot, the number they started from, the number after their `d`, and the proof. The proof lets everyone check “this new number really is the old one with my lock removed” without seeing `d` or the card face. It catches junk. It does not print the rank.
+
+The one-to-one `/poker/1.0.0` copy is the same shout, not a private card for Bob. Gossip on `poker/table/friday` is how it counts. The stream is a shortcut so a laptop might hear the peel faster. Same envelope, same signature. Duplicates are ignored.
+
+The peel shout does not name who goes next. It is not a shuffle step. Alice’s `PARTIAL_DECRYPT` only says: I am Alice, this is slot 0, I started from this number, here is the new number, here is the proof.
+
+Who is allowed to peel was already on every laptop, from the same DealSession recipe: seat list minus Bob, in that order. For Bob’s first card that is Alice, then Carol, then Dave. After Alice’s shout is checked, each machine ticks its own list. Carol’s laptop sees it is her turn and peels. Dave’s laptop sees it is not his turn yet and waits. Nobody sent Carol a “your turn” packet.
+
+## Betting Start
+
+The eight hole jobs are done. Each laptop can read only its own two faces. Opponent holes are still empty. That is not “everybody can see every hole card.”
+
+Now they finally build the poker table itself: a GameState. This is not the Lobby. It holds stacks, blinds, the pot, and whose turn it is. Each laptop copies its own two cards into its own seat and leaves the other seats’ cards blank. There is no local deck to deal from. Cards already came from peels.
+
+Then each machine posts the blinds by itself. Alice is dealer, so Bob is small blind and Carol is big blind. Chips come off those two stacks on every laptop the same way. Nobody publishes a blind shout. Same start state, same rule.
+
+The table UI opens now. You see fold, call, and raise, and your own two cards. The others show face-down.
+
+Pre-flop, the first person to act is the seat after the big blind: Dave. He picks fold, call, or raise. That click becomes a signed `PLAYER_ACTION` on `poker/table/friday`: who, what, how much, and a sequence number (gossip can arrive out of order). Each laptop checks it and applies it to its own GameState. Alice is not a referee. The next seat then acts the same way.
+
+The same worker that has been listening on `poker/table/friday` since the start is what hears Dave. It is not a new betting thread. It sleeps until a gossip frame arrives, then handles it.
+
+Checkout is two steps. First the envelope: `sender_id` is Dave, the signature matches his identity. Bad signature → drop. That only proves Dave signed those bytes. Then the GameState: the turn pointer is already on Dave. If the shout is not from that seat, it is rejected. A shout that arrives early (Alice before Dave) is parked until the sequence number lines up.
+
+Only after both checks does that laptop apply the fold, call, or raise to its own table, then step the pointer to the next seat who can still act. Alice’s UI flips to betting when her copy has done that. Nobody published “now Alice.”
+
+## Pre flop card reveal
+
+The pre-flop betting round is over. Each laptop saw that locally when the last action was applied. It does not deal three cards from a pile in RAM. There is no local deck. The phase is just “waiting for the next street.” Betting clicks are refused until those cards exist. Nobody published “deal the flop.”
+
+Each laptop already has the locked pile in its DealSession. It now starts public peels for the flop: three jobs, one card at a time. The burn under the flop is a skipped index. They do not peel it.
+
+This is the same peel chain as hole cards, with one change. For Bob’s hole card, Bob was skipped and took his last lock off only on his laptop. For a board card, nobody is skipped. All four peel, in seat order: Alice, then Bob, then Carol, then Dave. After Dave’s shout, the number has no locks left. Every laptop can turn it into a face. There is no unpublished last step.
+
+Still a chain: Alice peels the four-lock number, Bob peels Alice’s leftover, Carol peels Bob’s, Dave peels Carol’s. Same signed `PARTIAL_DECRYPT` on `poker/table/friday`, plus the best-effort one-to-one copy. Same proof: this new number really is the old one with my lock removed. The shout does not name who goes next. Each DealSession already has the recipe.
+
+They do that for three cards. Early peels park. They wait until all three jobs are done. Then each laptop writes those three faces onto its own GameState. Nobody sent a copy of “the flop.” Same three cards on Alice, Bob, Carol, and Dave.
+
+The table UI can show them now. Opponent hole cards stay face-down.
+
+## Flop
+
+The three flop cards are already on every GameState. Betting starts again by itself. Nobody published “flop betting.” First to act is the seat left of the dealer: Bob, not Dave. Dave was first before the flop because he sat after the big blind.
+
+Same mechanics as pre-flop. Bob picks fold, call, or raise. His laptop applies it, then publishes `PLAYER_ACTION` on `poker/table/friday`. The others wait for that frame, check it, apply it, and step the pointer. Alice, then Carol, then Dave, around the table the same way.
+
+When the last action of this round is applied, each laptop ends the round locally. It does not deal the next card from RAM. Waiting for the next street again. Betting clicks are refused until that card exists.
+
+That next card is the turn, not a second flop. One public peel job, not three. The burn under the turn is a skipped index. They do not peel it.
+
+Same chain as the flop cards: Alice, then Bob, then Carol, then Dave, each taking one lock off the leftover. Same `PARTIAL_DECRYPT` on `poker/table/friday`. After Dave, the number is a face on every laptop. They write that one card onto their own GameState. Nobody sent a copy of “the turn.” Four community cards, the same four, on Alice, Bob, Carol, and Dave.
+
+## Turn, River, Showdown
+
+The turn card is already on every GameState. Betting starts again, same as the flop. First to act is still Bob, left of the dealer. Same `PLAYER_ACTION` shouts on `poker/table/friday`. When that round ends, each laptop waits for a street again. It does not deal from RAM.
+
+The river is one public peel, like the turn. The burn under the river is a skipped index. Alice, Bob, Carol, then Dave each take a lock off. They write that one face onto their own GameState. Five community cards, the same five, on every laptop.
+
+River betting is the same walk. Bob first again. When the last river action is applied, they do **not** wait for another street. There is no sixth board card. Each laptop starts showdown on its own copy.
+
+If only one player is still in — everyone else folded — that player gets the pot. No hole cards are revealed. Opponent holes stay empty. The hand is over.
+
+If two or more are still in, the remaining hole cards have to become public. That is the same public peel as a board card, not the private hole deal from earlier. For each remaining player, all four peel both of that player’s hole indexes. After Dave’s last lock, every laptop can see those two faces. Folded players’ cards stay face-down.
+
+Each laptop then scores the hands it now has, splits the pots, and adds the chips to the winners’ stacks. Same start state, same cards, same rule — same payouts. Nobody sent a copy of “the result.” The table UI shows who won.
+
+## Next hand
+
+The table UI shows who won. After a short pause — about three seconds — the next hand starts by itself. Nobody clicks. Nobody published “hand 2.”
+
+Each laptop still has the same seat list from the lobby: Alice, Bob, Carol, Dave. That order does not get rebuilt. Each machine adds one to its dealer index. Hand 1’s dealer was 0, Alice. Hand 2’s dealer is 1, Bob. Same start state, same rule.
+
+They do not sit down again. Identity keys, SRA pairs, and Shamir shares stay where they were. The Keyring is the same box. What is new is the shuffle: a fresh mix of the same fifty-two starting numbers, then hole peels, blinds, betting, streets, showdown.
+
+Shuffle still starts at seat 0. Alice publishes the first `SHUFFLE_STEP` again, even though Bob is dealer this hand. Bob being dealer only changes blinds and who gets which hole slot. Alice is small blind. Carol is big blind. First to act pre-flop is Dave.
+
+Stacks are the ones left after hand 1. Hole cards and fold flags are cleared. If a seat went empty, it is still on that list — this program does not drop it. For a new group of people, restart the table.
+
+## Quits
+
+Dave cannot be dropped so the other three play a 3-seat game. The seat list stays Alice, Bob, Carol, Dave. Next hand still wants four locks and four shuffle steps.
+
+If Dave hits `q` or Ctrl-C, that only closes **his** program. Nobody gets a “Dave left, now we are three” packet. His heartbeats on `poker/heartbeat/friday` stop. After a short silence the others vote that he is gone and fold his seat for the hand they are in. They can finish that hand. They cannot drop him from the next shuffle. Restart the table if you want a new group.
+
+If he vanishes in the middle of a shuffle, the hand dies. The mix was only on his laptop. Shamir shares can rebuild a missing `d`. They cannot rebuild a mix that was never published.
+
+Equivocation is a second kind of cheat, not a card proof. Dave signs two different shouts with the same sequence number — fold to Alice, raise to Bob. Same seat, same seq, two stories.
+
+Each laptop already checks Ed25519 when a friday frame arrives. The public key comes from the Peer ID. The signature covers the type, who sent it, the seq, the time, and the inner bytes. That only proves Dave signed **that** envelope.
+
+A worker started at `Start()` wakes every few seconds and walks the Gamelog. It looks for the same sender and the same seq with two different payloads. Same bytes twice is just gossip repeating. Different bytes is the cheat. There is no extra SRA math here. It is a byte compare of two already-signed envelopes.
+
+On the live path that pair almost never sits in one notebook. The receive loop drops a seq it has already seen, and the log refuses a second row at that slot. Alice may only have the fold. Bob may only have the raise. Each scan sees one story. The table can already have split. Detection is after the fact, and this program does not stop the hand or take chips when it fires. Honest copies of the program do not send two stories.
+
+Shuffle has a tighter check on the way in: if Bob already copied Alice’s pile and a second `SHUFFLE_STEP` from Alice disagrees, that is a conflicting step and the shuffle errors. Same idea at showdown if a public hole reveal disagrees with cards already written.
+
